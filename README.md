@@ -36,14 +36,14 @@ host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --ne
 
 ### 3. Workflow Disaccoppiato (Proving Remoto / Verifica Differita)
 
-**Step A: Generazione (es. su server potente)**
+**Step A: Generazione**
 Genera la prova e salvala su file.
 ```bash
 host run --input '<u256; 42>' --prove groth16
 # Output salvato in: proofs/receipt_groth16_<timestamp>.bin
 ```
 
-**Step B: Verifica (es. da laptop o CI/CD)**
+**Step B: Verifica**
 Prendi il file generato e verificalo on-chain quando necessario.
 ```bash
 host run --source file --proof-file proofs/receipt_groth16_<timestamp>.bin --verify onchain --network sepolia --wallet $PRIVATE_KEY
@@ -55,7 +55,14 @@ Esegui verifiche multiple per testare la stabilità del contratto o calcolare il
 host run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10
 ```
 
-## 📊 Metriche
+## �️ Automazione Deploy
+
+Il repository include script Bash per semplificare il deployment dei contratti di verifica:
+
+- **`deploy_local.sh`**: Avvia un nodo Anvil locale (se non attivo) e deploya il contratto.
+- **`deploy_sepolia.sh`**: Effettua il deploy del contratto sulla testnet Sepolia (richiede variabili d'ambiente configurate).
+
+## �📊 Metriche
 
 Se abilitato tramite il flag `--metrics`, tutti i dati di esecuzione vengono salvati automaticamente nella cartella `/metrics` con timestamp univoci:
 - `session_metrics_*.csv`: Tempi di esecuzione e cicli utente.
