@@ -1,0 +1,24 @@
+# Rust
+target/
+**/target/
+**/*.rs.bk
+
+# Foundry / Solidity
+cache/
+out/
+broadcast/
+
+# Risc0 / Generated Contracts
+contracts/ImageID.sol
+contracts/Elf.sol
+receipt.bin
+
+# Environment / Secrets
+.env
+.env_vars
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+*:Zone.Identifier
