@@ -13,6 +13,10 @@ use alloy_sol_types::SolValue;
 use risc0_zkvm::guest::env;
 use std::io::Read;
 
+
+fn my_computation(...)
+
+
 fn main() {
     // 1. Leggi l'input (ABI-encoded dall'host) dall'ambiente env 
     let mut input_bytes = Vec::<u8>::new();
@@ -24,7 +28,7 @@ fn main() {
         .expect("Errore decodifica input");                         // esempio
 
     // 3. Esegui la logica computazionale
-    let result = my_computation(b, e, m);
+    let result = my_computation(b, e, m); // esempio
 
     // 4. Committa il risultato nel formato standard del framework
     
