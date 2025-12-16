@@ -8,6 +8,7 @@
 
 - **Architettura Modulare**: Esegui sessioni, proving e verifiche in modo indipendente o combinato.
 - **Supporto Multi-Backend**: Genera prove **STARK** (veloci) o **Groth16** (compatte e verificabili on-chain).
+- **Proving Locale**: Attualmente ottimizzato per carichi di lavoro CPU-bound eseguiti localmente.
 - **Verifica On-Chain Integrata**: Interazione nativa con Ethereum (Anvil, Sepolia) tramite Alloy.
 - **Metriche Dettagliate**: Esportazione opzionale (`--metrics`) di file CSV per l'analisi di performance (tempo, RAM, CPU, Gas) nella varie fasi.
 - **Dev Mode**: Mock Prover per testare istantaneamente l'integrazione degli smart contract senza attendere i tempi di proving.
@@ -60,7 +61,7 @@ host run --source file --proof-file <FILE> --verify onchain --network anvil --n-
 Il repository include script Bash per semplificare il deployment dei contratti di verifica:
 
 - **`deploy_local.sh`**: Avvia un nodo Anvil locale (se non attivo) e deploya il contratto.
-- **`deploy_sepolia.sh`**: Effettua il deploy del contratto sulla testnet Sepolia (richiede variabili d'ambiente configurate).
+- **`deploy_sepolia.sh`**: Effettua il deploy del contratto sulla testnet Sepolia (attualmente richiede variabili d'ambiente configurate).
 
 ## �📊 Metriche
 
