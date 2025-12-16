@@ -15,7 +15,7 @@ L'Host invia i dati al Guest come una sequenza di **byte grezzi** (ABI-encoded).
 Una volta decodificati i dati, puoi eseguire qualsiasi calcolo Rust puro.
 
 ### 3. Output (Dal Guest al Verifier)
-Il risultato del calcolo deve essere reso "pubblico" (committato nel Journal) in un formato che il contratto intelligente su Ethereum possa comprendere.
+Il risultato del calcolo deve essere reso "pubblico" (committato nel Journal) in un formato compatibile con uno smart contract Ethereum
 *   **Formato Richiesto**: Una tupla ABI-encoded: `(string type_signature, bytes encoded_value)`.
     *   `type_signature`: La stringa che descrive il tipo Solidity (es. `"uint256"`, `"(uint256,address)"`).
     *   `encoded_value`: Il risultato vero e proprio, codificato in ABI.
@@ -24,7 +24,7 @@ Il risultato del calcolo deve essere reso "pubblico" (committato nel Journal) in
 ## 📂 Dove modificare il codice
 
 Il file principale da modificare è:
-👉 `methods/guest/src/bin/guest.rs`
+`methods/guest/src/bin/guest.rs`
 
 Troverai già un esempio funzionante che implementa questo pattern. Puoi usarlo come base e sostituire la logica di calcolo con la tua.
 
