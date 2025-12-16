@@ -56,14 +56,14 @@ Esegui verifiche multiple per testare la stabilità del contratto o calcolare il
 host run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10
 ```
 
-## �️ Automazione Deploy
+## 🛠️ Automazione Deploy
 
 Il repository include script Bash per semplificare il deployment dei contratti di verifica:
 
 - **`deploy_local.sh`**: Avvia un nodo Anvil locale (se non attivo) e deploya il contratto.
 - **`deploy_sepolia.sh`**: Effettua il deploy del contratto sulla testnet Sepolia (attualmente richiede variabili d'ambiente configurate).
 
-## �📊 Metriche
+## 📊 Metriche
 
 Se abilitato tramite il flag `--metrics`, tutti i dati di esecuzione vengono salvati automaticamente nella cartella `/metrics` con timestamp univoci:
 - `session_metrics_*.csv`: Tempi di esecuzione e cicli utente.
