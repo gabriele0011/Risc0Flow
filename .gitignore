@@ -12,6 +12,8 @@ broadcast/
 contracts/ImageID.sol
 contracts/Elf.sol
 receipt.bin
+proofs/
+metrics/
 
 # Environment / Secrets
 .env

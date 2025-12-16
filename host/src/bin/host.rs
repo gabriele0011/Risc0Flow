@@ -32,7 +32,7 @@ use url::Url;
 use std::{
     fs::File,
     io::{Read, Write},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
     error::Error,
     fmt,
     str::FromStr,
@@ -199,6 +199,10 @@ struct RunCmd {
     /// Wallet (richiesto se --verify onchain --network sepolia)
     #[arg(long, value_name = "WALLET")]
     wallet: Option<String>,
+
+    /// Numero di transazioni di verifica da eseguire (default: 1)
+    #[arg(long, default_value_t = 1)]
+    n_runs: usize,
 
     /// Abilita metriche
     #[arg(long, default_value_t = false)]
@@ -463,10 +467,13 @@ pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool)
     let user_cycles_once: u64 = session_once.user_cycles;
 
     if metrics {
+        std::fs::create_dir_all("metrics")?;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let filename = format!("metrics/session_metrics_{}.csv", timestamp);
         let mut exec_log = File::options()
             .append(true)
             .create(true)
-            .open("session_metrics.csv")?;
+            .open(&filename)?;
         if exec_log.metadata()?.len() == 0 {
             writeln!(exec_log, "input_spec,time_ms,user_cycles")?;
         }
@@ -505,10 +512,17 @@ fn generate_proof_for_backend(
     // Nome backend per logging/metriche
     let backend_name: &str = match backend { Backend::Stark => "stark", Backend::Groth16 => "groth16" };
 
+    let is_dev_mode = std::env::var("RISC0_DEV_MODE").unwrap_or_default() == "1";
+
     // Seleziona le opzioni del prover in base al backend richiesto
-    let prover_opts = match backend {
-        Backend::Stark => ProverOpts::succinct(),
-        Backend::Groth16 => ProverOpts::groth16(),
+    let prover_opts = if is_dev_mode {
+        println!("⚠️  DEV MODE ATTIVO: Generazione prova mock (non verificabile on-chain)");
+        ProverOpts::default() 
+    } else {
+        match backend {
+            Backend::Stark => ProverOpts::succinct(),
+            Backend::Groth16 => ProverOpts::groth16(),
+        }
     };
 
     // Env nuovo per la fase di proving
@@ -539,12 +553,26 @@ fn generate_proof_for_backend(
 
     // SALVATAGGIO PROVA SU FILE (per testing verifica from-file)
     let receipt_bytes = bincode::serialize(&receipt).context("Serializzazione receipt fallita")?;
-    std::fs::write("receipt.bin", &receipt_bytes).context("Salvataggio receipt.bin fallito")?;
-    println!("Prova salvata in 'receipt.bin'");
+    
+    // Creazione cartella proofs se non esiste
+    std::fs::create_dir_all("proofs").context("Creazione cartella proofs fallita")?;
+
+    // Genera timestamp univoco (secondi dall'epoca)
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let filename = format!("proofs/receipt_{}_{}.bin", backend_name, timestamp);
+    std::fs::write(&filename, &receipt_bytes).context(format!("Salvataggio {} fallito", filename))?;
+    println!("Prova salvata in '{}'", filename);
 
     if metrics {
+        std::fs::create_dir_all("metrics")?;
         // CSV proving_metrics.csv: backend,phase,time_ms,seal_size,journal_len,receipt_bincode_len,peak_ram_kb,avg_cpu_pct,max_cpu_pct
-        let mut file = File::options().append(true).create(true).open("proving_metrics.csv")?;
+        let timestamp_metrics = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let filename_metrics = format!("metrics/proving_metrics_{}.csv", timestamp_metrics);
+        let mut file = File::options().append(true).create(true).open(&filename_metrics)?;
         if file.metadata()?.len() == 0 {
             writeln!(file, "backend,phase,time_ms,seal_size,journal_len,receipt_bincode_len,peak_ram_kb,avg_cpu_pct,max_cpu_pct")?;
         }
@@ -714,7 +742,7 @@ fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
 
 
 //verifica on chain con file
- fn exec_verify_onchain_from_file(path: &str, profile: &ChainProfile, metrics: bool) {
+ fn exec_verify_onchain_from_file(path: &str, profile: &ChainProfile, metrics: bool, n_runs: usize) {
     println!("Caricamento prova da file: {}", path);
 
     // Leggi il file
@@ -746,7 +774,7 @@ fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
         ChainProfile::Sepolia(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.wallet_private_key.clone()),
     };
 
-    if let Err(e) = run_onchain_verification(&receipt, contract_addr, &key, rpc_url, metrics) {
+    if let Err(e) = run_onchain_verification(&receipt, contract_addr, &key, rpc_url, metrics, n_runs) {
         eprintln!("Errore durante la verifica on-chain: {:?}", e);
     } else {
         println!("Verifica on-chain da file completata con successo.");
@@ -761,6 +789,7 @@ fn run_onchain_verification(
     signer_key: &str,
     rpc_url: Url,
     metrics: bool,
+    n_runs: usize,
 ) -> Result<()> {
     // Setup wallet e provider
     let signer = PrivateKeySigner::from_str(signer_key)
@@ -781,8 +810,11 @@ fn run_onchain_verification(
     let runtime = tokio::runtime::Runtime::new()?;
 
     // Setup metriche
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let mut tx_trace = if metrics {
-        let f = File::options().append(true).create(true).open("tx_trace_metrics.csv")?;
+        std::fs::create_dir_all("metrics")?;
+        let filename = format!("metrics/tx_trace_metrics_{}.csv", timestamp);
+        let f = File::options().append(true).create(true).open(&filename)?;
         if f.metadata()?.len() == 0 {
             let mut f_ref = &f;
             writeln!(f_ref, "tx_hash,gas_used,gas_price,block_number,time_ms,success")?;
@@ -793,7 +825,9 @@ fn run_onchain_verification(
     };
 
     let mut verify_metrics_log = if metrics {
-        let f = File::options().append(true).create(true).open("verify_metrics.csv")?;
+        std::fs::create_dir_all("metrics")?;
+        let filename = format!("metrics/verify_metrics_{}.csv", timestamp);
+        let f = File::options().append(true).create(true).open(&filename)?;
         if f.metadata()?.len() == 0 {
             let mut f_ref = &f;
             writeln!(f_ref, "avg_gas_used,avg_gas_price,avg_time_ms,success_pct")?;
@@ -807,10 +841,9 @@ fn run_onchain_verification(
     let mut successes = 0;
     let mut gas_used = Vec::new();
     let mut gas_price = Vec::new();
-    let total_runs = 10;
-
-    println!("Avvio verifica on-chain ({} transazioni)...", total_runs);
-    for i in 0..total_runs {
+    
+    println!("Avvio verifica on-chain ({} transazioni)...", n_runs);
+    for i in 0..n_runs {
         // set(bytes journal, bytes seal)
         let call_builder = contract.set(journal.clone().into(), seal.clone().into());
         
@@ -837,7 +870,7 @@ fn run_onchain_verification(
         gas_price.push(g_price);
 
         println!("Tx {}/{}: hash={:?}, success={}, gas={}, time={}ms", 
-            i+1, total_runs, tx_receipt.transaction_hash, success, g_used, duration_ms);
+            i+1, n_runs, tx_receipt.transaction_hash, success, g_used, duration_ms);
 
         if let Some(ref mut f) = tx_trace {
             writeln!(f, "{:?},{},{},{},{},{}",
@@ -855,7 +888,7 @@ fn run_onchain_verification(
         let avg_gas = if !gas_used.is_empty() { gas_used.iter().map(|&x| x as u128).sum::<u128>() / gas_used.len() as u128 } else { 0 };
         let avg_price = if !gas_price.is_empty() { gas_price.iter().map(|&x| x as u128).sum::<u128>() / gas_price.len() as u128 } else { 0 };
         let avg_time = if !times.is_empty() { times.iter().map(|&x| x as u128).sum::<u128>() / times.len() as u128 } else { 0 };
-        let success_rate = (successes as f64 / total_runs as f64) * 100.0;
+        let success_rate = (successes as f64 / n_runs as f64) * 100.0;
         
         writeln!(f, "{},{},{},{:.2}", avg_gas, avg_price, avg_time, success_rate)?;
     }
@@ -874,7 +907,10 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
             println!("✅ Verifica off-chain completata con successo in {}ms", duration);
             
             if metrics {
-                 if let Ok(mut f) = File::options().append(true).create(true).open("verify_offchain_metrics.csv") {
+                 let _ = std::fs::create_dir_all("metrics");
+                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                 let filename = format!("metrics/verify_offchain_metrics_{}.csv", timestamp);
+                 if let Ok(mut f) = File::options().append(true).create(true).open(&filename) {
                     if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
                         let _ = writeln!(f, "source,success,time_ms");
                     }
@@ -886,7 +922,10 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
             let duration = t_start.elapsed().as_millis();
             eprintln!("❌ Verifica off-chain FALLITA: {:?}", e);
              if metrics {
-                 if let Ok(mut f) = File::options().append(true).create(true).open("verify_offchain_metrics.csv") {
+                 let _ = std::fs::create_dir_all("metrics");
+                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                 let filename = format!("metrics/verify_offchain_metrics_{}.csv", timestamp);
+                 if let Ok(mut f) = File::options().append(true).create(true).open(&filename) {
                     if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
                         let _ = writeln!(f, "source,success,time_ms");
                     }
@@ -940,7 +979,8 @@ fn exec_verify_offchain_from_new_stub(receipts: &[(Backend, Receipt)], metrics: 
 fn exec_verify_onchain_from_new_stub(
     receipt: Option<&Receipt>,
     profile: &ChainProfile,
-    metrics: bool
+    metrics: bool,
+    n_runs: usize
 ) {
     let (rpc_url, contract_addr, key) = match profile {
         ChainProfile::Anvil(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.signer_private_key.clone()),
@@ -949,7 +989,7 @@ fn exec_verify_onchain_from_new_stub(
 
     if let Some(r) = receipt {
         println!("Avvio verifica on-chain (Groth16)...");
-        if let Err(e) = run_onchain_verification(r, contract_addr, &key, rpc_url, metrics) {
+        if let Err(e) = run_onchain_verification(r, contract_addr, &key, rpc_url, metrics, n_runs) {
             eprintln!("❌ Errore durante la verifica on-chain: {:?}", e);
         } else {
             println!("✅ Verifica on-chain completata con successo.");
@@ -966,7 +1006,7 @@ fn main() -> Result<()> {
     // Acquisizione dei paramentri da riga di comando 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run(RunCmd { input, session, prove, verify, network, source, proof_file, wallet, metrics }) => {
+        Commands::Run(RunCmd { input, session, prove, verify, network, source, proof_file, wallet, n_runs, metrics }) => {
             // Validazioni incrociate delle combinazioni richieste
             validate_run(&RunCmd {
                 input: input.clone(),
@@ -977,6 +1017,7 @@ fn main() -> Result<()> {
                 source,
                 proof_file: proof_file.clone(),
                 wallet: wallet.clone(),
+                n_runs,
                 metrics,
             })?;
 
@@ -994,6 +1035,7 @@ fn main() -> Result<()> {
             println!("Source: {:?}", source);
             println!("Proof file: {:?}", proof_file);
             println!("Wallet: {}", if wallet.is_some() { "[acquisito]" } else { "-" });
+            println!("N. Transazioni: {}", n_runs);
             println!("Metriche: {}", metrics);
 
             // Parsing e validazione dell'input (se presente)
@@ -1049,10 +1091,10 @@ fn main() -> Result<()> {
                     // onchain
                     (Some(VerifySource::File), VerifyMode::Onchain) => {
                         if let Some(path) = &proof_file {
-                            let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), metrics })?
+                            let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
                                 .expect("Profilo onchain assente");
 //TODO
-                            exec_verify_onchain_from_file(path, &profile, metrics);
+                            exec_verify_onchain_from_file(path, &profile, metrics, n_runs);
                         }
                     }
                     // prova generata nell'attuale esecuzione
@@ -1064,9 +1106,9 @@ fn main() -> Result<()> {
                     // onchain (only groth16)
                     (Some(VerifySource::New), VerifyMode::Onchain) => {
                         // On-chain: verifica solo prove Groth16
-                        let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), metrics })?
+                        let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
                             .expect("Profilo onchain assente");
-                        exec_verify_onchain_from_new_stub(groth16_receipt.as_ref(), &profile, metrics);
+                        exec_verify_onchain_from_new_stub(groth16_receipt.as_ref(), &profile, metrics, n_runs);
                     }
                     _ => {}
                 }
