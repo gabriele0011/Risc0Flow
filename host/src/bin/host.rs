@@ -516,7 +516,7 @@ fn generate_proof_for_backend(
 
     // Seleziona le opzioni del prover in base al backend richiesto
     let prover_opts = if is_dev_mode {
-        println!("⚠️  DEV MODE ATTIVO: Generazione prova mock (non verificabile on-chain)");
+        println!("DEV MODE ATTIVO: Generazione prova mock (non verificabile on-chain)");
         ProverOpts::default() 
     } else {
         match backend {
@@ -904,7 +904,7 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
     match receipt.verify(GUEST_ID) {
         Ok(()) => {
             let duration = t_start.elapsed().as_millis();
-            println!("✅ Verifica off-chain completata con successo in {}ms", duration);
+            println!("Verifica off-chain completata con successo in {}ms", duration);
             
             if metrics {
                  let _ = std::fs::create_dir_all("metrics");
@@ -920,7 +920,7 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
         },
         Err(e) => {
             let duration = t_start.elapsed().as_millis();
-            eprintln!("❌ Verifica off-chain FALLITA: {:?}", e);
+            eprintln!("Verifica off-chain FALLITA: {:?}", e);
              if metrics {
                  let _ = std::fs::create_dir_all("metrics");
                  let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -966,7 +966,7 @@ fn exec_verify_offchain_from_file_stub(path: &str, metrics: bool) {
 // verifica offchain con prova generata in questa sessione
 fn exec_verify_offchain_from_new_stub(receipts: &[(Backend, Receipt)], metrics: bool) {
     if receipts.is_empty() {
-        println!("⚠️ Nessuna prova disponibile per la verifica off-chain.");
+        println!("Nessuna prova disponibile per la verifica off-chain.");
         return;
     }
     for (backend, receipt) in receipts {
@@ -990,12 +990,12 @@ fn exec_verify_onchain_from_new_stub(
     if let Some(r) = receipt {
         println!("Avvio verifica on-chain (Groth16)...");
         if let Err(e) = run_onchain_verification(r, contract_addr, &key, rpc_url, metrics, n_runs) {
-            eprintln!("❌ Errore durante la verifica on-chain: {:?}", e);
+            eprintln!("Errore durante la verifica on-chain: {:?}", e);
         } else {
-            println!("✅ Verifica on-chain completata con successo.");
+            println!("Verifica on-chain completata con successo.");
         }
     } else {
-        eprintln!("⚠️  Nessuna prova Groth16 disponibile per la verifica on-chain.");
+        eprintln!("Nessuna prova Groth16 disponibile per la verifica on-chain.");
     }
 }
 
