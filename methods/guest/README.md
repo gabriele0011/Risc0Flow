@@ -1,45 +1,35 @@
-## 🛠️ Sviluppo Custom (Guest Code)
+# 🛠️ Sviluppo del Guest Code
 
-Per integrare la tua logica applicativa, devi modificare il codice del **Guest**.
+Il **Guest Code** è la parte dell'applicazione che viene eseguita all'interno della zkVM. È qui che risiede la logica che vuoi provare crittograficamente.
 
-### 1. Scrivi il Codice
-Il codice sorgente del guest si trova in:
-`methods/guest/src/bin/guest.rs`
+## 📌 Concetti Chiave
 
-Il framework utilizza un pattern specifico per input e output basato su **Alloy** (ABI encoding). Di seguito un esempio:
+Per garantire che il tuo programma sia compatibile con il sistema di verifica on-chain di Risc0Flow, devi seguire un flusso specifico di Input/Output.
 
-```rust
-use alloy_sol_types::SolValue;
-use risc0_zkvm::guest::env;
-use std::io::Read;
+### 1. Input (Dall'Host al Guest)
+L'Host invia i dati al Guest come una sequenza di **byte grezzi** (ABI-encoded).
+*   **Cosa fare**: Usa `env::stdin().read_to_end(&mut buffer)` per leggere i byte grezzi in un vettore, poi decodificali usando `Alloy` (es. `<(Type1, Type2)>::abi_decode(&buffer)`).
+*   **Perché**: Questo permette di passare strutture dati complesse (tuple, array, struct) in modo standardizzato.
 
+### 2. Logica Applicativa
+Una volta decodificati i dati, puoi eseguire qualsiasi calcolo Rust puro.
 
-fn my_computation(...)
+### 3. Output (Dal Guest al Verifier)
+Il risultato del calcolo deve essere reso "pubblico" (committato nel Journal) in un formato che il contratto intelligente su Ethereum possa comprendere.
+*   **Formato Richiesto**: Una tupla ABI-encoded: `(string type_signature, bytes encoded_value)`.
+    *   `type_signature`: La stringa che descrive il tipo Solidity (es. `"uint256"`, `"(uint256,address)"`).
+    *   `encoded_value`: Il risultato vero e proprio, codificato in ABI.
+*   **Cosa fare**: Usa `env::commit_slice` per inviare questa tupla codificata.
 
+## 📂 Dove modificare il codice
 
-fn main() {
-    // 1. Leggi l'input (ABI-encoded dall'host) dall'ambiente env 
-    let mut input_bytes = Vec::<u8>::new();
-    env::stdin().read_to_end(&mut input_bytes).unwrap();
+Il file principale da modificare è:
+👉 `methods/guest/src/bin/guest.rs`
 
-    // 2. Decodifica i parametri attesi (es. una tupla di tre valori U256)
-    // Assicurati che i tipi corrispondano a quelli che passerai via CLI (--input <..., type_x, x, ...>)
-    let (b, e, m) = <(U256, U256, U256)>::abi_decode(&input_bytes)  // esempio
-        .expect("Errore decodifica input");                         // esempio
+Troverai già un esempio funzionante che implementa questo pattern. Puoi usarlo come base e sostituire la logica di calcolo con la tua.
 
-    // 3. Esegui la logica computazionale
-    let result = my_computation(b, e, m); // esempio
+## 📦 Dipendenze Utili
 
-    // 4. Committa il risultato nel formato standard del framework
-    
-    // Il framework si aspetta una coppia della forma: //
-    // <string_solidity_type_name, bytes_encoded_data> = (type_info, raw_data)
-    let type_info = "uint256"; // Tipo Solidity del risultato
-    let raw_data = result.abi_encode(); // Encoding
-    // Commit journal
-    env::commit_slice(&(type_info, raw_data).abi_encode());
-}
-```
-
-### 2. Build
-Il framework ricompila automaticamente il guest quando esegui `host run`.
+Il template include già le librerie necessarie nel `Cargo.toml`:
+- `risc0-zkvm`: Per interagire con la VM (`env::read`, `env::commit`).
+- `alloy-sol-types`: Per la codifica/decodifica ABI compatibile con Ethereum.
