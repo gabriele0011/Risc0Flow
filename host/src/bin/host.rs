@@ -3,7 +3,7 @@ use alloy::{
     network::EthereumWallet, providers::ProviderBuilder, signers::local::PrivateKeySigner,
     sol_types::SolValue,
 };
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, FixedBytes};
 use alloy_primitives::U256;
 
 // gestione errori
@@ -242,6 +242,14 @@ fn validate_run(cmd: &RunCmd) -> Result<()> {
     // --verify con --source new richiede almeno una prova richiesta nello stesso comando
     if matches!(cmd.source, Some(VerifySource::New)) && cmd.verify.is_some() && cmd.prove.is_empty() {
         bail!("Verifica con --source new richiede anche --prove <BACKEND>... (nessuna prova richiesta)");
+    }
+
+    // On-chain richiede il backend groth16 (unica prova verificabile on-chain)
+    if matches!(cmd.verify, Some(VerifyMode::Onchain))
+        && matches!(cmd.source, Some(VerifySource::New))
+        && !cmd.prove.iter().any(|b| matches!(b, Backend::Groth16))
+    {
+        bail!("--verify onchain richiede almeno una prova groth16 quando --source new");
     }
 
     // --input richiesto per session/prove/source=new
@@ -703,8 +711,8 @@ fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
             
             // Tenta di recuperare l'indirizzo automaticamente dal file di broadcast di Foundry
             let contract = find_anvil_contract_address()
-                .or_else(|| std::env::var("MOD_EXP_CONTRACT_ADDRESS").ok().and_then(|s| Address::from_str(&s).ok()))
-                .context("Indirizzo contratto non trovato! Assicurati di aver fatto il deploy (broadcast/Deploy.s.sol/31337/run-latest.json) o imposta MOD_EXP_CONTRACT_ADDRESS.")?;
+                .or_else(|| std::env::var("CONTRACT_ADDRESS").ok().and_then(|s| Address::from_str(&s).ok()))
+                .context("Indirizzo contratto non trovato! Assicurati di aver fatto il deploy (broadcast/Deploy.s.sol/31337/run-latest.json) o imposta CONTRACT_ADDRESS.")?;
 
             println!("Contratto rilevato automaticamente: {}", contract);
 
@@ -981,7 +989,7 @@ fn exec_verify_onchain_from_new_stub(
     profile: &ChainProfile,
     metrics: bool,
     n_runs: usize
-) {
+) -> Result<()> {
     let (rpc_url, contract_addr, key) = match profile {
         ChainProfile::Anvil(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.signer_private_key.clone()),
         ChainProfile::Sepolia(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.wallet_private_key.clone()),
@@ -991,11 +999,12 @@ fn exec_verify_onchain_from_new_stub(
         println!("Avvio verifica on-chain (Groth16)...");
         if let Err(e) = run_onchain_verification(r, contract_addr, &key, rpc_url, metrics, n_runs) {
             eprintln!("Errore durante la verifica on-chain: {:?}", e);
-        } else {
-            println!("Verifica on-chain completata con successo.");
+            return Err(e);
         }
+        println!("Verifica on-chain completata con successo.");
+        Ok(())
     } else {
-        eprintln!("Nessuna prova Groth16 disponibile per la verifica on-chain.");
+        anyhow::bail!("Nessuna prova Groth16 disponibile per la verifica on-chain");
     }
 }
 
@@ -1054,7 +1063,13 @@ fn main() -> Result<()> {
                 ValidatedSolData::Bytes(b) => Bytes::from(b.clone()).abi_encode(),
                 ValidatedSolData::Bool(v) => v.abi_encode(),
                 ValidatedSolData::Address(a) => a.abi_encode(),
-                ValidatedSolData::BytesN(arr,_) => Bytes::from(arr.clone()).abi_encode(),
+                // bytesN va codificato come fixed-bytes (32) ABI word, non come bytes dinamici
+                ValidatedSolData::BytesN(arr,_) => {
+                    let mut padded = [0u8; 32];
+                    let len = arr.len();
+                    padded[..len].copy_from_slice(arr);
+                    FixedBytes::<32>::from(padded).abi_encode()
+                },
             });
 
             // generazione di una session
@@ -1108,7 +1123,7 @@ fn main() -> Result<()> {
                         // On-chain: verifica solo prove Groth16
                         let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
                             .expect("Profilo onchain assente");
-                        exec_verify_onchain_from_new_stub(groth16_receipt.as_ref(), &profile, metrics, n_runs);
+                        exec_verify_onchain_from_new_stub(groth16_receipt.as_ref(), &profile, metrics, n_runs)?;
                     }
                     _ => {}
                 }

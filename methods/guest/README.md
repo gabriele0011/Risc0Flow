@@ -1,35 +1,35 @@
-# 🛠️ Sviluppo del Guest Code
+# 🛠️ Guest Code Development
 
-Il **Guest Code** è la parte dell'applicazione che viene eseguita all'interno della zkVM. È qui che risiede la logica che vuoi provare crittograficamente.
+**Guest Code** is the part of the application that runs inside the zkVM. This is where the logic you want to cryptographically prove resides.
 
-## 📌 Concetti Chiave
+## 📌 Key Concepts
 
-Per garantire che il tuo programma sia compatibile con il sistema di verifica on-chain di Risc0Flow, devi seguire un flusso specifico di Input/Output.
+To ensure your program is compatible with Risc0Flow's on-chain verification system, you must follow a specific Input/Output flow.
 
-### 1. Input (Dall'Host al Guest)
-L'Host invia i dati al Guest come una sequenza di **byte grezzi** (ABI-encoded).
-*   **Cosa fare**: Usa `env::stdin().read_to_end(&mut buffer)` per leggere i byte grezzi in un vettore, poi decodificali usando `Alloy` (es. `<(Type1, Type2)>::abi_decode(&buffer)`).
-*   **Perché**: Questo permette di passare strutture dati complesse (tuple, array, struct) in modo standardizzato.
+### 1. Input (Host to Guest)
+The Host sends data to the Guest as a sequence of **raw bytes** (ABI-encoded).
+*   **What to do**: Use `env::stdin().read_to_end(&mut buffer)` to read raw bytes into a vector, then decode them using `Alloy` (e.g., `<(Type1, Type2)>::abi_decode(&buffer)`).
+*   **Why**: This allows passing complex data structures (tuples, arrays, structs) in a standardized way.
 
-### 2. Logica Applicativa
-Una volta decodificati i dati, puoi eseguire qualsiasi calcolo Rust puro.
+### 2. Application Logic
+Once the data is decoded, you can perform any pure Rust computation.
 
-### 3. Output (Dal Guest al Verifier)
-Il risultato del calcolo deve essere reso "pubblico" (committato nel Journal) in un formato compatibile con uno smart contract Ethereum
-*   **Formato Richiesto**: Una tupla ABI-encoded: `(string type_signature, bytes encoded_value)`.
-    *   `type_signature`: La stringa che descrive il tipo Solidity (es. `"uint256"`, `"(uint256,address)"`).
-    *   `encoded_value`: Il risultato vero e proprio, codificato in ABI.
-*   **Cosa fare**: Usa `env::commit_slice` per inviare questa tupla codificata.
+### 3. Output (Guest to Verifier)
+The calculation result must be made "public" (committed to the Journal) in a format compatible with an Ethereum smart contract.
+*   **Required Format**: An ABI-encoded tuple: `(string type_signature, bytes encoded_value)`.
+    *   `type_signature`: The string describing the Solidity type (e.g., `"uint256"`, `"(uint256,address)"`).
+    *   `encoded_value`: The actual result, ABI-encoded.
+*   **What to do**: Use `env::commit_slice` to send this encoded tuple.
 
-## 📂 Dove modificare il codice
+## 📂 Where to modify the code
 
-Il file principale da modificare è:
+The main file to modify is:
 `methods/guest/src/bin/guest.rs`
 
-Troverai già un esempio funzionante che implementa questo pattern. Puoi usarlo come base e sostituire la logica di calcolo con la tua.
+You will already find a working example implementing this pattern. You can use it as a base and replace the calculation logic with your own.
 
-## 📦 Dipendenze Utili
+## 📦 Useful Dependencies
 
-Il template include già le librerie necessarie nel `Cargo.toml`:
-- `risc0-zkvm`: Per interagire con la VM (`env::read`, `env::commit`).
-- `alloy-sol-types`: Per la codifica/decodifica ABI compatibile con Ethereum.
+The template already includes the necessary libraries in `Cargo.toml`:
+- `risc0-zkvm`: To interact with the VM (`env::read`, `env::commit`).
+- `alloy-sol-types`: For Ethereum-compatible ABI encoding/decoding.
