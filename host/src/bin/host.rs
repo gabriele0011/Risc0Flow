@@ -1,4 +1,57 @@
-// alloy è un toolkit Ethereum (types, RPC, signing)
+// Copyright 2024 RISC Zero, Inc. and Risc0Flow Contributors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! # Risc0Flow Host Application
+//!
+//! This module implements the host-side orchestrator for the RISC Zero zkVM proving pipeline.
+//! It provides a non-interactive CLI to manage the complete lifecycle of zero-knowledge proofs:
+//!
+//! 1. **Session Execution**: Run the guest program in the zkVM executor to generate a trace.
+//! 2. **Proof Generation**: Generate cryptographic proofs (STARK or Groth16) from the execution trace.
+//! 3. **Verification**: Verify proofs either off-chain (locally) or on-chain (Ethereum).
+//!
+//! ## Architecture Overview
+//!
+//! 
+//! ┌──────────────────────────────────────────────────────────────────────────────┐
+//! │                            HOST APPLICATION                                  │
+//! ├──────────────────────────────────────────────────────────────────────────────┤
+//! │                                                                              │
+//! │   CLI Input ──► Validator ──► ABI Encoder ──► Guest Executor (zkVM)          │
+//! │                                                      │                       │
+//! │                                                      ▼                       │
+//! │   Verifier (offchain/onchain) ◄── Proof Generator (STARK/Groth16)            │
+//! │                                                                              │
+//! └──────────────────────────────────────────────────────────────────────────────┘
+//!
+//!
+//! ## Supported Data Types
+//!
+//! The host supports Solidity-compatible ABI encoding for the following types:
+//! - `uint256`, `uint<M>` (where M is 8-256, multiple of 8)
+//! - `string`, `bytes`, `bytes<N>` (where N is 1-32)
+//! - `bool`, `address`
+//! - `merkle_proof` (custom type for Merkle tree membership proofs)
+
+// ============================================================================
+// EXTERNAL DEPENDENCIES
+// ============================================================================
+
+// Alloy: A comprehensive Ethereum toolkit providing types, RPC client, and transaction signing.
+// Used for all blockchain interactions including wallet management and contract calls.
 use alloy::{
     network::EthereumWallet, providers::ProviderBuilder, signers::local::PrivateKeySigner,
     sol_types::SolValue,
@@ -6,29 +59,41 @@ use alloy::{
 use alloy_primitives::{Address, Bytes, FixedBytes};
 use alloy_primitives::U256;
 
-// gestione errori
+// Anyhow: Ergonomic error handling with context propagation.
+// Provides the `Result` type alias and `Context` trait for adding error context.
 use anyhow::{Context, Result};
 
-// elf binary del guest 
+// Methods crate: Auto-generated at build time, contains the compiled guest ELF binary
+// and its cryptographic image ID (a commitment to the guest code).
 use methods::{GUEST_ELF, GUEST_ID};
 
-// funzione helper per impacchettare una receipt da verificare onchain
+// RISC Zero Ethereum Contracts: Utilities for packaging proofs for on-chain verification.
+// `encode_seal` converts a Receipt into the format expected by the Solidity verifier.
 use risc0_ethereum_contracts::encode_seal;
-// include funzionalita della zkvm
+
+// RISC Zero zkVM: Core proving infrastructure.
+// - `default_prover`: Factory for the configured prover backend (local or Bonsai).
+// - `ExecutorEnv`: Environment for guest execution, including input data.
+// - `ExecutorImpl`: The zkVM executor that runs guest code and produces execution traces.
+// - `ProverOpts`: Configuration for proof generation (STARK, Groth16, etc.).
+// - `VerifierContext`: Context for proof verification.
+// - `Receipt`: The cryptographic proof artifact containing seal and journal.
+// - `Session`: Execution trace from running the guest, used for proving.
 use risc0_zkvm::{
     default_prover, ExecutorEnv, ExecutorImpl, ProverOpts, VerifierContext, Receipt, Session,
 };
 
-// ABI interface generata via alloy `sol!`
+// Alloy sol! macro: Generates Rust bindings from Solidity interface files.
+// This creates type-safe contract interaction code from IContract.sol.
 alloy::sol!(
     #[sol(rpc, all_derives)]
     "../contracts/IContract.sol"
 );
 
-// usato per rpc_ur
+// URL parsing for RPC endpoints.
 use url::Url;
 
-// include std esteso
+// Standard library imports for file I/O, timing, and string operations.
 use std::{
     fs::File,
     io::{Read, Write},
@@ -38,35 +103,81 @@ use std::{
     str::FromStr,
 };
 
-// Modulo per le metriche di sistema
+// Date/time formatting for human-readable timestamps in filenames.
+use chrono::Local;
+
+// System metrics module for monitoring CPU and memory usage during proof generation.
 mod system_metrics;
 use system_metrics::MetricsMonitor;
 
 
-/* 
-*   Sistema di validazione dei tipi
-*/
+// ============================================================================
+// TYPE VALIDATION SYSTEM
+// ============================================================================
+//
+// This section implements a type-safe parsing and validation layer for Solidity
+// data types. It ensures that user input conforms to the expected format before
+// ABI encoding and transmission to the guest program.
+
+/// Represents errors that can occur during input parsing and validation.
+/// 
+/// This enum provides specific error variants to help users diagnose input issues:
+/// - `UnknownType`: The declared type is not in the set of supported Solidity types.
+/// - `InvalidDataFormat`: The data does not conform to the declared type's format.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
-    UnknownType(String),           // il tipo dichiarato non è supportato
-    InvalidDataFormat(String),      // i dati non rispettano il formato dichiarato
+    /// The declared type identifier is not recognized by the parser.
+    /// Contains the unrecognized type string for error reporting.
+    UnknownType(String),
+    
+    /// The data value does not conform to the expected format for its declared type.
+    /// Contains a descriptive error message explaining the format violation.
+    InvalidDataFormat(String),
 }
 
-// validazione dell'input
+/// Represents a successfully parsed and validated Solidity data value.
+/// 
+/// Each variant corresponds to a Solidity type and contains the parsed Rust
+/// representation ready for ABI encoding. This enum serves as the intermediate
+/// representation between raw user input and ABI-encoded bytes.
 #[derive(Debug, PartialEq, Clone)]
 pub enum ValidatedSolData {
+    /// A 256-bit unsigned integer. Corresponds to Solidity's `uint256`.
     Uint256(U256),
+    
+    /// A tuple of three 256-bit unsigned integers.
+    /// Used for operations requiring multiple numeric inputs (e.g., modular exponentiation).
     Uint256Triple(U256, U256, U256),
+    
+    /// A UTF-8 encoded string. Corresponds to Solidity's `string` type.
     String(String),
+    
+    /// A dynamic byte array. Corresponds to Solidity's `bytes` type.
     Bytes(Vec<u8>),
+    
+    /// A boolean value. Corresponds to Solidity's `bool` type.
     Bool(bool),
+    
+    /// An Ethereum address (20 bytes). Corresponds to Solidity's `address` type.
     Address(Address),
-    BytesN(Vec<u8>, usize), // (value, N) con 1<=N<=32
-    /// Merkle proof per proof-of-membership
-    /// leaf: hash della foglia (già pre-hashed)
-    /// siblings: array degli hash dei nodi fratelli lungo il path
-    /// directions: true = sibling a destra, false = sibling a sinistra
-    /// expected_root: root attesa dell'albero
+    
+    /// A fixed-size byte array. Corresponds to Solidity's `bytes1` through `bytes32`.
+    /// The tuple contains (value, N) where N is the byte length (1 <= N <= 32).
+    BytesN(Vec<u8>, usize),
+    
+    /// Merkle tree proof of membership.
+    /// 
+    /// This type encapsulates all data required to verify that a leaf belongs to
+    /// a Merkle tree with a known root. The guest program will recompute the root
+    /// from the leaf and proof path, then assert equality with the expected root.
+    /// 
+    /// # Fields
+    /// - leaf: The SHA-256 hash of the leaf node (pre-hashed by the caller).
+    /// - siblings: Array of sibling hashes along the path from leaf to root.
+    /// - directions: Boolean array indicating sibling positions.
+    ///   - true: Sibling is on the right; concatenate as hash(current || sibling).
+    ///   - false: Sibling is on the left; concatenate as hash(sibling || current).
+    /// - expected_root: The known root hash that the proof should reconstruct.
     MerkleProof {
         leaf: [u8; 32],
         siblings: Vec<[u8; 32]>,
@@ -75,7 +186,16 @@ pub enum ValidatedSolData {
     },
 }
 
-// Struttura per input tipizzato nel formato <type_data, data> 
+/// Represents a fully parsed and validated typed input.
+/// 
+/// This structure is the result of successfully parsing user input in the format
+/// `<type; data>`. It preserves both the original string representations (for
+/// logging and error reporting) and the validated data (for ABI encoding).
+/// 
+/// # Fields
+/// - `type_name`: The original type declaration string (e.g., "uint256", "merkle_proof").
+/// - `data`: The original data string as provided by the user.
+/// - `validated`: The parsed and validated data, ready for ABI encoding.
 #[derive(Debug, Clone)]
 struct TypedInput {
     type_name: String,
@@ -92,30 +212,44 @@ struct TypedInput {
 */
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-// rappresenta i backend di proving supportati da CLI
+// Represents the supported proving backends available via CLI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Backend {
     #[value(name = "stark")] Stark,
     #[value(name = "groth16")] Groth16,
 }
 
-// indica l'origine della prova da verificare. Le possibilità sono: generata in questa sessione o importata 
+// Specifies the origin of the proof to verify: generated in this session or imported from file
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum VerifySource { #[value(name = "new")] New, #[value(name = "file")] File }
 
-// indica il tipo di verifica: offchain o onchain
+// Specifies the verification mode: offchain (local) or onchain (Ethereum)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum VerifyMode { #[value(name = "offchain")] Offchain, #[value(name = "onchain")] Onchain }
 
-// specifica quale rete usare durante la verifica: anvil o sepolia
+// Specifies which network to use for on-chain verification: Anvil (local) or Sepolia (testnet)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Network { #[value(name = "anvil")] Anvil, #[value(name = "sepolia")] Sepolia }
 
 
-/*
-*   Configurazioni specifiche per profilo di rete on-chain
-*/
+// ============================================================================
+// BLOCKCHAIN NETWORK CONFIGURATION
+// ============================================================================
+//
+// These structures encapsulate all network-specific parameters required for
+// on-chain verification. They are constructed from CLI arguments and environment
+// variables, providing a clean abstraction over network differences.
 
+/// Configuration for the Anvil local development network.
+/// 
+/// Anvil is Foundry's local Ethereum node, designed for development and testing.
+/// It uses deterministic accounts derived from a known mnemonic, eliminating
+/// the need for real funds or external key management.
+/// 
+/// # Default Values
+/// - Chain ID: 31337 (Anvil's standard chain ID)
+/// - RPC URL: http://localhost:8545
+/// - Signer: Account 0 from Anvil's default mnemonic
 #[derive(Debug, Clone)]
 struct AnvilConfig {
     chain_id: u64,
@@ -124,6 +258,14 @@ struct AnvilConfig {
     signer_private_key: String,
 }
 
+/// Configuration for the Sepolia testnet.
+/// 
+/// Sepolia is Ethereum's recommended testnet for application testing.
+/// It requires testnet ETH (obtainable from faucets) and a real wallet.
+/// 
+/// # Security Note
+/// The wallet private key should be provided via the `--wallet` CLI argument.
+/// Never use a mainnet private key on testnets.
 #[derive(Debug, Clone)]
 struct SepoliaConfig {
     chain_id: u64,
@@ -132,6 +274,10 @@ struct SepoliaConfig {
     wallet_private_key: String,
 }
 
+/// Unified chain profile enumeration.
+/// 
+/// This enum allows functions to accept either network configuration
+/// polymorphically, extracting the relevant parameters as needed.
 #[derive(Debug, Clone)]
 enum ChainProfile {
     Anvil(AnvilConfig),
@@ -140,184 +286,204 @@ enum ChainProfile {
 
 use std::path::Path;
 
-/*
-* definizione CLI e parsing
-*/
+// CLI definition and argument parsing
 
-// definizione della "interfaccia" pubblica della CLI 
+// Main CLI struct definition
 #[derive(Parser, Debug)]
 #[command(
     name = "host",
-    about = "CLI non interattiva per orchestrare sessione, proving e verifica (acquisizione parametri)",
+    about = "Non-interactive CLI for orchestrating session, proving, and verification",
     version,
-    long_about = "Comando unico: run. Formato input: <tipo_par_1, ..., tipo_par_n; par_1, ..., par_n>.\n\
-    Backends: stark, groth16. Verifica: prima scegli la sorgente (new | file), poi il modo (offchain | onchain).\n\
-    Se onchain, specifica la rete: anvil | sepolia (su sepolia serve --wallet).",
-    help_template = "{name} {version}\n\n{about}\n\nUSO:\n    {usage}\n\nCOMANDI:\n{subcommands}\nOPZIONI GLOBALI:\n{options}\n\nESEMPI:\n  # Sessione\n  host run --input '<u256; 0x01>' --session\n  # Prova con 2 backend + metriche\n  host run --input '<u256; 0x01>' --prove stark groth16 --metrics\n  # Verifica locale offchain di una prova da file\n  host run --source file --proof-file receipts/prova.json --verify offchain\n  # Verifica on-chain in anvil di una prova da file\n  host run --source file --proof-file receipts/prova.json --verify onchain --network anvil\n  # Verifica on-chain in sepolia di una prova appena generata\n  host run --input '<u256; 0x02>' --prove groth16 --source new --verify onchain --network sepolia --wallet 0xYOUR_PRIVATE_KEY\n\nSuggerimenti:\n  - Prima scegli la sorgente prova: --source new (con --input e --prove) oppure --source file (con --proof-file)\n  - Poi scegli il modo: --verify offchain | onchain; se onchain serve anche --network anvil|sepolia\n  - --wallet è richiesto solo se --verify onchain --network sepolia\n",
+    long_about = "Single command: run. Input format: <type_1, ..., type_n; val_1, ..., val_n>.\n\
+    Backends: stark, groth16. Verification: first choose source (new | file), then mode (offchain | onchain).\n\
+    For onchain, specify network: anvil | sepolia (sepolia requires --wallet).",
+    help_template = "{name} {version}\n\n{about}\n\nUSAGE:\n    {usage}\n\nCOMMANDS:\n{subcommands}\nGLOBAL OPTIONS:\n{options}\n\nEXAMPLES:\n  # Session\n  host run --input '<u256; 0x01>' --session\n  # Prove with 2 backends + metrics\n  host run --input '<u256; 0x01>' --prove stark groth16 --metrics\n  # Local offchain verification from file\n  host run --source file --proof-file proofs/proof.bin --verify offchain\n  # On-chain verification on Anvil from file\n  host run --source file --proof-file proofs/proof.bin --verify onchain --network anvil\n  # On-chain verification on Sepolia with freshly generated proof\n  host run --input '<u256; 0x02>' --prove groth16 --source new --verify onchain --network sepolia --wallet 0xYOUR_PRIVATE_KEY\n\nTips:\n  - First choose proof source: --source new (with --input and --prove) or --source file (with --proof-file)\n  - Then choose mode: --verify offchain | onchain; if onchain, also specify --network anvil|sepolia\n  - --wallet is required only with --verify onchain --network sepolia\n",
     subcommand_required = true,
     arg_required_else_help = true
 )]
 
-// struct che incapsula il set di sottocomandi Comands disponibili
+// Struct that encapsulates the set of available subcommands
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
-// Run(RunCmd) definisce il sottocomando run: raggruppa tutti i flag della pipeline
+// Run(RunCmd) defines the run subcommand: groups all pipeline flags
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
-        about = "Esegue la pipeline configurata (sessione, proving, verifica) in una riga",
-        long_about = "Combina le operazioni desiderate in un'unica esecuzione: --session, --prove, --verify.",
-        after_help = "Esempi:\n  host run --input '<u256; 0x01>' --session\n  host run --input '<u256; 0x01>' --prove stark groth16\n  host run --verify offchain --source file --proof-file receipts/prova.json\n  host run --source file --proof-file receipts/prova.json --verify onchain --network anvil\n  host run --input '<u256; 0x02>' --prove groth16 --source new --verify onchain --network sepolia --wallet 0xYOUR_PRIVATE_KEY"
+        about = "Executes the configured pipeline (session, proving, verification) in a single command",
+        long_about = "Combines desired operations into a single execution: --session, --prove, --verify.",
+        after_help = "Examples:\n  host run --input '<u256; 0x01>' --session\n  host run --input '<u256; 0x01>' --prove stark groth16\n  host run --verify offchain --source file --proof-file proofs/proof.bin\n  host run --source file --proof-file proofs/proof.bin --verify onchain --network anvil\n  host run --input '<u256; 0x02>' --prove groth16 --source new --verify onchain --network sepolia --wallet 0xYOUR_PRIVATE_KEY"
     )]
     Run(RunCmd),
 }
 
-// raccoglie tutti i flag e le opzioni necessari a descrivere
-// una pipeline composta (sessione, proving, verifica).
+// Collects all flags and options needed to describe
+// a composite pipeline (session, proving, verification).
 #[derive(Args, Debug)]
 struct RunCmd {
-    /// Stringa: <tipo_par_1, ..., tipo_par_n; par_1, ..., par_n>
+    /// Input string: <type_1, ..., type_n; val_1, ..., val_n>
     #[arg(long, value_name = "INPUT_SPEC")]
     input: Option<String>,
 
-    /// Genera una sessione
+    /// Generate a session
     #[arg(long, default_value_t = false)]
     session: bool,
 
-    /// Seleziona backend di prova (uno o più): stark, groth16
+    /// Select proof backend(s) (one or more): stark, groth16
     #[arg(long, value_enum, num_args = 1.., value_name = "BACKEND")]
     prove: Vec<Backend>,
 
-    /// Modo di verifica: offchain (locale) | onchain
+    /// Verification mode: offchain (local) | onchain
     #[arg(long, value_enum, value_name = "MODE")]
     verify: Option<VerifyMode>,
 
-    /// Rete on-chain: anvil | sepolia (richiesto se --verify onchain)
+    /// On-chain network: anvil | sepolia (required if --verify onchain)
     #[arg(long, value_enum, value_name = "NETWORK")]
     network: Option<Network>,
 
-    /// Origine prova: new | file
+    /// Proof source: new | file
     #[arg(long, value_enum, value_name = "SOURCE")]
     source: Option<VerifySource>,
 
-    /// File prova (richiesto se --source file)
+    /// Proof file path (required if --source file)
     #[arg(long, value_name = "FILE")]
     proof_file: Option<String>,
 
-    /// Wallet (richiesto se --verify onchain --network sepolia)
+    /// Wallet private key (required if --verify onchain --network sepolia)
     #[arg(long, value_name = "WALLET")]
     wallet: Option<String>,
 
-    /// Numero di transazioni di verifica da eseguire (default: 1)
+    /// Number of verification transactions to execute (default: 1)
     #[arg(long, default_value_t = 1)]
     n_runs: usize,
 
-    /// Abilita metriche
+    /// Enable metrics collection
     #[arg(long, default_value_t = false)]
     metrics: bool,
 }
 
 
-// ##########################################################################
-// GESTIONE DELL'INPUT
-// ##########################################################################
-/*
-*   valida le combinazioni di flag passate a host run
-*   e blocca configurazioni ambigue o incomplete, restituendo errori specifici
-*/
+// ============================================================================
+// INPUT VALIDATION AND PARSING
+// ============================================================================
+
+/// Validates the combination of CLI flags for the `run` subcommand.
+/// 
+/// This function enforces the logical constraints between different options,
+/// preventing ambiguous or incomplete configurations before execution begins.
+/// 
+/// # Validation Rules
+/// 
+/// 1. **Operation Selection**: At least one of `--session`, `--prove`, or `--verify` must be specified.
+/// 2. **Verification Dependencies**:
+///    - `--verify` requires `--source` (new or file).
+///    - `--verify onchain` requires `--network` (anvil or sepolia).
+/// 3. **Source Dependencies**:
+///    - `--source new` requires `--prove` and `--input`.
+///    - `--source file` requires `--proof-file`.
+/// 4. **On-chain Requirements**:
+///    - On-chain verification requires a Groth16 proof.
+///    - Sepolia network requires `--wallet`.
+/// 5. **Mutual Exclusions**:
+///    - `--source new` is incompatible with `--proof-file`.
+///    - `--source file` is incompatible with `--input`.
+///    - `--wallet` is only valid for Sepolia on-chain verification.
+/// 
+/// # Returns
+/// - `Ok(())` if all validations pass.
+/// - `Err` with a descriptive message if any validation fails.
 fn validate_run(cmd: &RunCmd) -> Result<()> {
     use anyhow::{bail, ensure};
 
-    // Almeno un'operazione selezionata
+    // At least one operation must be selected
     let any_op = cmd.session || !cmd.prove.is_empty() || cmd.verify.is_some();
-    ensure!(any_op, "Nessuna operazione selezionata: usa almeno uno tra --session, --prove, --verify");
+    ensure!(any_op, "No operation selected: use at least one of --session, --prove, --verify");
 
-    // --verify richiede anche --source
+    // --verify requires --source
     if cmd.verify.is_some() && cmd.source.is_none() {
-        bail!("--verify richiede anche --source (new|file)");
+        bail!("--verify requires --source (new|file)");
     }
 
-    // --verify onchain richiede --network
+    // --verify onchain requires --network
     if matches!(cmd.verify, Some(VerifyMode::Onchain)) && cmd.network.is_none() {
-        bail!("--verify onchain richiede --network (anvil|sepolia)");
+        bail!("--verify onchain requires --network (anvil|sepolia)");
     }
 
-    // --network non ammessa se verify=offchain o assente
+    // --network not allowed if verify=offchain or absent
     if (matches!(cmd.verify, Some(VerifyMode::Offchain)) || cmd.verify.is_none()) && cmd.network.is_some() {
-        bail!("--network è valido solo con --verify onchain");
+        bail!("--network is only valid with --verify onchain");
     }
 
-    // --verify con --source new richiede almeno una prova richiesta nello stesso comando
+    // --verify with --source new requires at least one proof backend in the same command
     if matches!(cmd.source, Some(VerifySource::New)) && cmd.verify.is_some() && cmd.prove.is_empty() {
-        bail!("Verifica con --source new richiede anche --prove <BACKEND>... (nessuna prova richiesta)");
+        bail!("Verification with --source new also requires --prove <BACKEND>... (no proof requested)");
     }
 
-    // On-chain richiede il backend groth16 (unica prova verificabile on-chain)
+    // On-chain requires groth16 backend (only proof verifiable on-chain)
     if matches!(cmd.verify, Some(VerifyMode::Onchain))
         && matches!(cmd.source, Some(VerifySource::New))
         && !cmd.prove.iter().any(|b| matches!(b, Backend::Groth16))
     {
-        bail!("--verify onchain richiede almeno una prova groth16 quando --source new");
+        bail!("--verify onchain requires at least one groth16 proof when --source new");
     }
 
-    // --input richiesto per session/prove/source=new
+    // --input required for session/prove/source=new
     let needs_input = cmd.session || !cmd.prove.is_empty() || matches!(cmd.source, Some(VerifySource::New));
     if needs_input {
         let has_input = cmd.input.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        ensure!(has_input, "--input è richiesto per --session, --prove o --source new");
+        ensure!(has_input, "--input is required for --session, --prove, or --source new");
     }
 
-    // --proof-file richiesto per source=file
+    // --proof-file required for source=file
     if matches!(cmd.source, Some(VerifySource::File)) {
         let has_file = cmd.proof_file.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        ensure!(has_file, "--proof-file è richiesto quando --source file");
+        ensure!(has_file, "--proof-file is required when --source file");
     }
 
-    // --wallet richiesto per onchain sepolia
+    // --wallet required for onchain sepolia
     if matches!(cmd.verify, Some(VerifyMode::Onchain)) && matches!(cmd.network, Some(Network::Sepolia)) {
         let has_wallet = cmd.wallet.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
-        ensure!(has_wallet, "--wallet è richiesto quando --verify onchain --network sepolia");
+        ensure!(has_wallet, "--wallet is required when --verify onchain --network sepolia");
     }
 
-    // Vincoli aggiuntivi per evitare combinazioni ridondanti/ambigue
-    // 1) Con source=new non si deve passare --proof-file
+    // Additional constraints to avoid redundant/ambiguous combinations
+    // 1) With source=new, --proof-file should not be passed
     if matches!(cmd.source, Some(VerifySource::New)) && cmd.proof_file.is_some() {
-        bail!("Con --source new non usare --proof-file (vale solo per --source file)");
+        bail!("With --source new, do not use --proof-file (only valid for --source file)");
     }
 
-    // 2) Con source=file non si deve passare --input (non richiesto, potenzialmente ambiguo)
+    // 2) With source=file, --input should not be passed (not required, potentially ambiguous)
     if matches!(cmd.source, Some(VerifySource::File)) && cmd.input.is_some() {
-        bail!("Con --source file non usare --input (serve solo per --source new o per prove/session)");
+        bail!("With --source file, do not use --input (only needed for --source new or prove/session)");
     }
 
-    // 3) Con verify=offchain non si deve passare --wallet
+    // 3) With verify=offchain, --wallet should not be passed
     if matches!(cmd.verify, Some(VerifyMode::Offchain)) && cmd.wallet.is_some() {
-        bail!("--wallet è valido solo con --verify onchain --network sepolia (non con offchain)");
+        bail!("--wallet is only valid with --verify onchain --network sepolia (not with offchain)");
     }
 
-    // 4) Con verify=onchain e network=anvil non si deve passare --wallet
+    // 4) With verify=onchain and network=anvil, --wallet should not be passed
     if matches!(cmd.verify, Some(VerifyMode::Onchain)) && matches!(cmd.network, Some(Network::Anvil)) && cmd.wallet.is_some() {
-        bail!("--wallet è valido solo con --verify onchain --network sepolia (non con anvil)");
+        bail!("--wallet is only valid with --verify onchain --network sepolia (not with anvil)");
     }
 
     Ok(())
 }
 
 
-//typechecking
+// Implement standard error traits for ParseError to enable use with anyhow and other error handling.
 impl Error for ParseError {}
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ParseError::UnknownType(type_str) => {
-                write!(f, "Tipo sconosciuto: '{}'", type_str)
+                write!(f, "Unknown type: '{}'", type_str)
             }
             ParseError::InvalidDataFormat(err_msg) => {
-                write!(f, "Formato dati non valido: {}", err_msg)
+                write!(f, "Invalid data format: {}", err_msg)
             }
         }
     }
@@ -364,14 +530,14 @@ pub fn parse_and_validate_typed(typedata: &str, data: &str) -> Result<ValidatedS
         "uint256" => {
             U256::from_str(data)
                 .map(ValidatedSolData::Uint256)
-                .map_err(|e| ParseError::InvalidDataFormat(format!("uint256 non valido: {}", e)))
+                .map_err(|e| ParseError::InvalidDataFormat(format!("invalid uint256: {}", e)))
         },
 
-        // La tripla è già gestita sopra in maniera più permissiva
+        // Triple is already handled above more permissively
 
         "string" => {
             if data.is_empty() {
-                Err(ParseError::InvalidDataFormat("La stringa non può essere vuota".to_string()))
+                Err(ParseError::InvalidDataFormat("string cannot be empty".to_string()))
             } else {
                 Ok(ValidatedSolData::String(data.to_string()))
             }
@@ -379,18 +545,18 @@ pub fn parse_and_validate_typed(typedata: &str, data: &str) -> Result<ValidatedS
 
         "bytes" => {
             if !data.starts_with("0x") {
-                return Err(ParseError::InvalidDataFormat("I bytes devono iniziare con 0x".to_string()));
+                return Err(ParseError::InvalidDataFormat("bytes must start with 0x".to_string()));
             }
             hex::decode(&data[2..])
                 .map(ValidatedSolData::Bytes)
-                .map_err(|e| ParseError::InvalidDataFormat(format!("bytes non validi: {}", e)))
+                .map_err(|e| ParseError::InvalidDataFormat(format!("invalid bytes: {}", e)))
         },
 
         "bool" => {
             match data.to_lowercase().as_str() {
                 "true" | "1" => Ok(ValidatedSolData::Bool(true)),
                 "false" | "0" => Ok(ValidatedSolData::Bool(false)),
-                _ => Err(ParseError::InvalidDataFormat("bool deve essere true/false/1/0".to_string()))
+                _ => Err(ParseError::InvalidDataFormat("bool must be true/false/1/0".to_string()))
             }
         },
 
@@ -398,47 +564,47 @@ pub fn parse_and_validate_typed(typedata: &str, data: &str) -> Result<ValidatedS
             // uint<M>
             if let Some(rest) = typedata.strip_prefix("uint") {
                 if rest.is_empty() {
-                    return Err(ParseError::InvalidDataFormat("uint senza dimensione: usa uint256 o uint<M>".to_string()));
+                    return Err(ParseError::InvalidDataFormat("uint without size: use uint256 or uint<M>".to_string()));
                 }
-                let bits: u16 = rest.parse().map_err(|_| ParseError::InvalidDataFormat("Dimensione di uint non valida".to_string()))?;
+                let bits: u16 = rest.parse().map_err(|_| ParseError::InvalidDataFormat("invalid uint size".to_string()))?;
                 if bits % 8 != 0 || bits == 0 || bits > 256 {
-                    return Err(ParseError::InvalidDataFormat("uint<M>: M deve essere multiplo di 8, 8..=256".to_string()));
+                    return Err(ParseError::InvalidDataFormat("uint<M>: M must be a multiple of 8, 8..=256".to_string()));
                 }
-                let val = U256::from_str(data).map_err(|e| ParseError::InvalidDataFormat(format!("uint{} non valido: {}", bits, e)))?;
+                let val = U256::from_str(data).map_err(|e| ParseError::InvalidDataFormat(format!("invalid uint{}: {}", bits, e)))?;
                 if bits < 256 {
                     let bound = U256::from(1u64) << (bits as u32);
                     if val >= bound {
-                        return Err(ParseError::InvalidDataFormat(format!("Valore fuori range per uint{}", bits)));
+                        return Err(ParseError::InvalidDataFormat(format!("value out of range for uint{}", bits)));
                     }
                 }
-                // Nota: per l'encoding tratteremo come uint256 (ABI word) lato host
+                // Note: for encoding we treat as uint256 (ABI word) on host side
                 return Ok(ValidatedSolData::Uint256(val));
             }
 
             // bytesN (1..=32)
             if let Some(rest) = typedata.strip_prefix("bytes") {
                 if !rest.is_empty() {
-                    let n: usize = rest.parse().map_err(|_| ParseError::InvalidDataFormat("bytesN: N non valido".to_string()))?;
+                    let n: usize = rest.parse().map_err(|_| ParseError::InvalidDataFormat("bytesN: invalid N".to_string()))?;
                     if n == 0 || n > 32 {
-                        return Err(ParseError::InvalidDataFormat("bytesN: N deve essere 1..=32".to_string()));
+                        return Err(ParseError::InvalidDataFormat("bytesN: N must be 1..=32".to_string()));
                     }
-                    if !data.starts_with("0x") { return Err(ParseError::InvalidDataFormat("bytesN deve iniziare con 0x".to_string())); }
+                    if !data.starts_with("0x") { return Err(ParseError::InvalidDataFormat("bytesN must start with 0x".to_string())); }
                     let hex_part = &data[2..];
                     if hex_part.len() != n * 2 {
-                        return Err(ParseError::InvalidDataFormat(format!("bytes{}: lunghezza attesa {} hex chars, trovati {}", n, n*2, hex_part.len())));
+                        return Err(ParseError::InvalidDataFormat(format!("bytes{}: expected {} hex chars, found {}", n, n*2, hex_part.len())));
                     }
-                    let v = hex::decode(hex_part).map_err(|e| ParseError::InvalidDataFormat(format!("bytes{} non validi: {}", n, e)))?;
+                    let v = hex::decode(hex_part).map_err(|e| ParseError::InvalidDataFormat(format!("invalid bytes{}: {}", n, e)))?;
                     return Ok(ValidatedSolData::BytesN(v, n));
                 }
             }
 
             // address
             if typedata == "address" {
-                let addr = Address::from_str(data).map_err(|_| ParseError::InvalidDataFormat("address non valido (atteso 0x + 40 hex)".to_string()))?;
+                let addr = Address::from_str(data).map_err(|_| ParseError::InvalidDataFormat("invalid address (expected 0x + 40 hex)".to_string()))?;
                 return Ok(ValidatedSolData::Address(addr));
             }
 
-            // merkle_proof: formato <merkle_proof; leaf=0x..., siblings=[0x...,0x...], directions=[l,r,...], root=0x...>
+            // merkle_proof: format <merkle_proof; leaf=0x..., siblings=[0x...,0x...], directions=[l,r,...], root=0x...>
             if typedata == "merkle_proof" {
                 return parse_merkle_proof(data);
             }
@@ -449,25 +615,54 @@ pub fn parse_and_validate_typed(typedata: &str, data: &str) -> Result<ValidatedS
 }
 
 
-/// Parser specializzato per il tipo merkle_proof
-/// Formato: leaf=0x..., siblings=[0x...,0x...], directions=[l,r,...], root=0x...
-/// Dove directions: l/left/0 = sibling a sinistra, r/right/1 = sibling a destra
+/// Specialized parser for the `merkle_proof` type.
+/// 
+/// Parses a Merkle proof specification string into its component parts and validates
+/// consistency constraints. The proof data is used by the guest program to verify
+/// membership in a Merkle tree.
+/// 
+/// # Input Format
+/// 
+/// ```text
+/// leaf=0x<64 hex chars>, siblings=[0x<64>,...], directions=[l|r,...], root=0x<64 hex chars>
+/// ```
+/// 
+/// ## Field Descriptions
+/// 
+/// - **leaf**: The SHA-256 hash of the data element to prove membership for.
+/// - **siblings**: Array of sibling hashes along the path from leaf to root.
+/// - **directions**: Position of each sibling relative to the current node:
+///   - `l`, `left`, `0`, `false`: Sibling is on the left.
+///   - `r`, `right`, `1`, `true`: Sibling is on the right.
+/// - **root**: The expected Merkle root that the proof should reconstruct.
+/// 
+/// # Validation
+/// 
+/// - All hashes must be exactly 32 bytes (64 hex characters).
+/// - `siblings` and `directions` arrays must have the same length.
+/// - At least one sibling must be provided (tree depth >= 1).
+/// 
+/// # Example
+/// 
+/// ```text
+/// leaf=0xabc123..., siblings=[0xdef456...], directions=[r], root=0x789abc...
+/// ```
 fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
-    // Helper per estrarre un valore da una chiave
+    // Helper to extract a value from a key
     fn extract_value<'a>(data: &'a str, key: &str) -> Option<&'a str> {
-        // Cerca "key=" nel data
+        // Search for "key=" in data
         let pattern = format!("{}=", key);
         if let Some(start_idx) = data.find(&pattern) {
             let value_start = start_idx + pattern.len();
             let remaining = &data[value_start..];
             
-            // Se inizia con '[', trova la ']' corrispondente
+            // If starts with '[', find matching ']'
             if remaining.starts_with('[') {
                 if let Some(end_idx) = remaining.find(']') {
                     return Some(&remaining[..=end_idx]);
                 }
             } else {
-                // Altrimenti prendi fino alla prossima virgola o fine stringa
+                // Otherwise take until next comma or end of string
                 let end_idx = remaining.find(',').unwrap_or(remaining.len());
                 return Some(remaining[..end_idx].trim());
             }
@@ -475,34 +670,34 @@ fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
         None
     }
 
-    // Helper per parsare un bytes32
+    // Helper to parse a bytes32 value
     fn parse_bytes32(hex_str: &str) -> Result<[u8; 32], ParseError> {
         let hex_str = hex_str.trim();
         if !hex_str.starts_with("0x") {
             return Err(ParseError::InvalidDataFormat(
-                format!("bytes32 deve iniziare con 0x, trovato: '{}'", hex_str)
+                format!("bytes32 must start with 0x, found: '{}'", hex_str)
             ));
         }
         let hex_part = &hex_str[2..];
         if hex_part.len() != 64 {
             return Err(ParseError::InvalidDataFormat(
-                format!("bytes32 richiede 64 caratteri hex, trovati {}", hex_part.len())
+                format!("bytes32 requires 64 hex characters, found {}", hex_part.len())
             ));
         }
         let bytes = hex::decode(hex_part).map_err(|e| 
-            ParseError::InvalidDataFormat(format!("bytes32 hex non valido: {}", e))
+            ParseError::InvalidDataFormat(format!("invalid bytes32 hex: {}", e))
         )?;
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&bytes);
         Ok(arr)
     }
 
-    // Helper per parsare un array di bytes32
+    // Helper to parse an array of bytes32
     fn parse_bytes32_array(arr_str: &str) -> Result<Vec<[u8; 32]>, ParseError> {
         let arr_str = arr_str.trim();
         if !arr_str.starts_with('[') || !arr_str.ends_with(']') {
             return Err(ParseError::InvalidDataFormat(
-                "Array siblings deve essere racchiuso tra [ e ]".to_string()
+                "siblings array must be enclosed in [ and ]".to_string()
             ));
         }
         let inner = &arr_str[1..arr_str.len()-1];
@@ -520,12 +715,12 @@ fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
         Ok(result)
     }
 
-    // Helper per parsare un array di directions
+    // Helper to parse a directions array
     fn parse_directions(arr_str: &str) -> Result<Vec<bool>, ParseError> {
         let arr_str = arr_str.trim();
         if !arr_str.starts_with('[') || !arr_str.ends_with(']') {
             return Err(ParseError::InvalidDataFormat(
-                "Array directions deve essere racchiuso tra [ e ]".to_string()
+                "directions array must be enclosed in [ and ]".to_string()
             ));
         }
         let inner = &arr_str[1..arr_str.len()-1];
@@ -537,10 +732,10 @@ fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
         for item in inner.split(',') {
             let item = item.trim().to_lowercase();
             let dir = match item.as_str() {
-                "r" | "right" | "1" | "true" => true,   // sibling a destra
-                "l" | "left" | "0" | "false" => false,  // sibling a sinistra
+                "r" | "right" | "1" | "true" => true,   // sibling on the right
+                "l" | "left" | "0" | "false" => false,  // sibling on the left
                 _ => return Err(ParseError::InvalidDataFormat(
-                    format!("Direction non valida: '{}'. Usa l/left/0 o r/right/1", item)
+                    format!("invalid direction: '{}'. Use l/left/0 or r/right/1", item)
                 )),
             };
             result.push(dir);
@@ -548,33 +743,33 @@ fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
         Ok(result)
     }
 
-    // Estrai i campi richiesti
+    // Extract required fields
     let leaf_str = extract_value(data, "leaf")
-        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'leaf' mancante".to_string()))?;
+        .ok_or_else(|| ParseError::InvalidDataFormat("missing 'leaf' field".to_string()))?;
     let siblings_str = extract_value(data, "siblings")
-        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'siblings' mancante".to_string()))?;
+        .ok_or_else(|| ParseError::InvalidDataFormat("missing 'siblings' field".to_string()))?;
     let directions_str = extract_value(data, "directions")
-        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'directions' mancante".to_string()))?;
+        .ok_or_else(|| ParseError::InvalidDataFormat("missing 'directions' field".to_string()))?;
     let root_str = extract_value(data, "root")
-        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'root' mancante".to_string()))?;
+        .ok_or_else(|| ParseError::InvalidDataFormat("missing 'root' field".to_string()))?;
 
-    // Parse dei singoli campi
+    // Parse individual fields
     let leaf = parse_bytes32(leaf_str)?;
     let siblings = parse_bytes32_array(siblings_str)?;
     let directions = parse_directions(directions_str)?;
     let expected_root = parse_bytes32(root_str)?;
 
-    // Validazioni di consistenza
+    // Consistency validations
     if siblings.len() != directions.len() {
         return Err(ParseError::InvalidDataFormat(
-            format!("siblings ({}) e directions ({}) devono avere la stessa lunghezza", 
+            format!("siblings ({}) and directions ({}) must have the same length", 
                 siblings.len(), directions.len())
         ));
     }
 
     if siblings.is_empty() {
         return Err(ParseError::InvalidDataFormat(
-            "Merkle proof deve avere almeno un sibling (profondità >= 1)".to_string()
+            "Merkle proof must have at least one sibling (depth >= 1)".to_string()
         ));
     }
 
@@ -590,17 +785,17 @@ fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
 fn parse_typed_input(spec: &str) -> Result<TypedInput, ParseError> {
     let trimmed = spec.trim();
     if !trimmed.starts_with('<') || !trimmed.ends_with('>') {
-        return Err(ParseError::InvalidDataFormat("Input deve essere racchiuso tra < e >".into()));
+        return Err(ParseError::InvalidDataFormat("Input must be enclosed in < and >".into()));
     }
     let inner = &trimmed[1..trimmed.len()-1];
     let parts: Vec<&str> = inner.splitn(2, ';').collect();
     if parts.len() != 2 {
-        return Err(ParseError::InvalidDataFormat("Formato deve essere <tipo; dati>".into()));
+        return Err(ParseError::InvalidDataFormat("Format must be <type; data>".into()));
     }
     let type_name = parts[0].trim();
     let data = parts[1].trim();
     if type_name.is_empty() || data.is_empty() {
-        return Err(ParseError::InvalidDataFormat("Tipo o dati vuoti".into()));
+        return Err(ParseError::InvalidDataFormat("Type or data is empty".into()));
     }
     let validated = parse_and_validate_typed(type_name, data)?;
     Ok(TypedInput { type_name: type_name.to_string(), data: data.to_string(), validated })
@@ -609,15 +804,44 @@ fn parse_typed_input(spec: &str) -> Result<TypedInput, ParseError> {
 
 
 
-// ##########################################################################
-// GENERAZIONE SESSIONE
-// ##########################################################################
+// ============================================================================
+// SESSION GENERATION
+// ============================================================================
 
-// Genera una sessione eseguendo il guest con l'input ABI-encoded.
-// Ritorna la Session e, se metrics=true, registra su CSV: input_spec,time_ms,user_cycles
+/// Executes the guest program in the zkVM to generate an execution trace (Session).
+/// 
+/// This function runs the guest code with the provided ABI-encoded input, producing
+/// a `Session` object that contains the complete execution trace. The session can
+/// then be used to generate cryptographic proofs.
+/// 
+/// # Process
+/// 
+/// 1. Constructs an `ExecutorEnv` with the input data.
+/// 2. Loads the guest ELF binary into the executor.
+/// 3. Runs the guest to completion, capturing the execution trace.
+/// 4. Optionally records performance metrics to a CSV file.
+/// 
+/// # Arguments
+/// 
+/// - `encoded_input`: ABI-encoded input bytes to pass to the guest.
+/// - `input_label`: Human-readable label for the input (used in metrics logging).
+/// - `metrics`: If true, records timing and cycle count to `metrics/session_metrics_<timestamp>.csv`.
+/// 
+/// # Returns
+/// 
+/// - `Ok(Session)`: The execution trace, ready for proof generation.
+/// - `Err`: If guest execution fails (e.g., assertion failure, invalid input).
+/// 
+/// # Metrics Recorded
+/// 
+/// | Column | Description |
+/// |--------|-------------|
+/// | `input_spec` | The input label/specification |
+/// | `time_ms` | Execution time in milliseconds |
+/// | `user_cycles` | Number of zkVM cycles consumed |
 pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool) -> Result<Session> {
     
-    println!("generazione session in corso...");
+    println!("Generating session...");
     let env = ExecutorEnv::builder()
         .write_slice(encoded_input)
         .build()?;
@@ -630,7 +854,7 @@ pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool)
 
     if metrics {
         std::fs::create_dir_all("metrics")?;
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
         let filename = format!("metrics/session_metrics_{}.csv", timestamp);
         let mut exec_log = File::options()
             .append(true)
@@ -639,11 +863,11 @@ pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool)
         if exec_log.metadata()?.len() == 0 {
             writeln!(exec_log, "input_spec,time_ms,user_cycles")?;
         }
-        // CSV-safe: racchiudi tra doppi apici e raddoppia eventuali apici interni
+        // CSV-safe: wrap in double quotes and escape internal quotes
         let safe_label = input_label.replace('"', "\"\"");
         writeln!(exec_log, "\"{}\",{},{}", safe_label, t_exec_session, user_cycles_once)?;
     }
-    println!("generazione session terminata con successo");
+    println!("Session generation completed successfully");
 
     Ok(session_once)
 }
@@ -658,27 +882,67 @@ fn exec_prove_stub(input: &str, backend: Backend, metrics: bool) {
 */
 
 
-// ##########################################################################
-// GENERAZIONE DELLA PROVA
-// ##########################################################################
+// ============================================================================
+// PROOF GENERATION
+// ============================================================================
 
-// Misura e genera una prova per un backend specifico riutilizzando una Session esistente.
-// Registra metriche dettagliate (tempo, dimensioni seal/journal/receipt serializzato) se metrics=true.
+/// Generates a cryptographic proof for the specified backend.
+/// 
+/// This function executes the complete proving pipeline: running the guest,
+/// generating the proof according to the selected backend, and serializing
+/// the resulting receipt to disk for later verification.
+/// 
+/// # Proof Backends
+/// 
+/// | Backend | Proof System | Use Case |
+/// |---------|--------------|----------|
+/// | STARK | Scalable Transparent ARgument of Knowledge | Off-chain verification, intermediate proofs |
+/// | Groth16 | Pairing-based zkSNARK | On-chain verification (constant gas cost) |
+/// 
+/// # Process
+/// 
+/// 1. Configures prover options based on the selected backend.
+/// 2. Constructs an execution environment with the input data.
+/// 3. Invokes the prover to generate the proof.
+/// 4. Serializes the receipt to `proofs/receipt_<backend>_<timestamp>.bin`.
+/// 5. Optionally records detailed metrics to CSV.
+/// 
+/// # Arguments
+/// 
+/// - `backend`: The proof system to use (STARK or Groth16).
+/// - `encoded_input`: ABI-encoded input bytes for the guest.
+/// - `metrics`: If true, records performance metrics.
+/// 
+/// # Returns
+/// 
+/// - `Ok(Receipt)`: The cryptographic proof artifact.
+/// - `Err`: If proof generation fails.
+/// 
+/// # Metrics Recorded
+/// 
+/// | Column | Description |
+/// |--------|-------------|
+/// | `backend` | STARK or Groth16 |
+/// | `time_ms` | Total proving time |
+/// | `seal_size` | Size of the cryptographic seal in bytes |
+/// | `journal_len` | Size of the public journal in bytes |
+/// | `peak_ram_kb` | Peak memory usage during proving |
+/// | `avg_cpu_pct` | Average CPU utilization |
 fn generate_proof_for_backend(
     backend: Backend,
-    encoded_input: &[u8], // input già ABI-encoded
+    encoded_input: &[u8],
     metrics: bool,
 ) -> Result<Receipt> {
     use anyhow::Context;
 
-    // Nome backend per logging/metriche
+    // Determine backend name for logging and metrics
     let backend_name: &str = match backend { Backend::Stark => "stark", Backend::Groth16 => "groth16" };
 
     let is_dev_mode = std::env::var("RISC0_DEV_MODE").unwrap_or_default() == "1";
 
-    // Seleziona le opzioni del prover in base al backend richiesto
+    // Configure prover options based on the selected backend
     let prover_opts = if is_dev_mode {
-        println!("DEV MODE ATTIVO: Generazione prova mock (non verificabile on-chain)");
+        println!("DEV MODE ACTIVE: Generating mock proof (not verifiable on-chain)");
         ProverOpts::default() 
     } else {
         match backend {
@@ -687,22 +951,22 @@ fn generate_proof_for_backend(
         }
     };
 
-    // Env nuovo per la fase di proving
+    // Construct a new execution environment for the proving phase
     let env = ExecutorEnv::builder()
         .write_slice(encoded_input)
         .build()
-        .context("Impossibile costruire l'ExecutorEnv per il proving")?;
+        .context("Failed to construct ExecutorEnv for proving")?;
 
     let t0 = Instant::now();
     
-    // Avvia monitoraggio risorse se metriche attive
+    // Start resource monitoring if metrics are enabled
     let monitor = if metrics { Some(MetricsMonitor::start()) } else { None };
 
     let prove_result = default_prover()
         .prove_with_ctx(env, &VerifierContext::default(), GUEST_ELF, &prover_opts)
-        .context("Errore nella generazione della prova")?;
+        .context("Error during proof generation")?;
     
-    // Ferma monitoraggio e raccogli dati
+    // Stop monitoring and collect data
     let sys_metrics = if let Some(m) = monitor {
         Some(m.stop())
     } else {
@@ -713,26 +977,23 @@ fn generate_proof_for_backend(
 
     let receipt = prove_result.receipt;
 
-    // SALVATAGGIO PROVA SU FILE (per testing verifica from-file)
-    let receipt_bytes = bincode::serialize(&receipt).context("Serializzazione receipt fallita")?;
+    // SAVE PROOF TO FILE (for later verification from file)
+    let receipt_bytes = bincode::serialize(&receipt).context("Receipt serialization failed")?;
     
-    // Creazione cartella proofs se non esiste
-    std::fs::create_dir_all("proofs").context("Creazione cartella proofs fallita")?;
+    // Create proofs directory if it doesn't exist
+    std::fs::create_dir_all("proofs").context("Failed to create proofs directory")?;
 
-    // Genera timestamp univoco (secondi dall'epoca)
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Generate human-readable timestamp (day_month_year_hour_minute)
+    let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
 
     let filename = format!("proofs/receipt_{}_{}.bin", backend_name, timestamp);
-    std::fs::write(&filename, &receipt_bytes).context(format!("Salvataggio {} fallito", filename))?;
-    println!("Prova salvata in '{}'", filename);
+    std::fs::write(&filename, &receipt_bytes).context(format!("Failed to save {}", filename))?;
+    println!("Proof saved to '{}'", filename);
 
     if metrics {
         std::fs::create_dir_all("metrics")?;
         // CSV proving_metrics.csv: backend,phase,time_ms,seal_size,journal_len,receipt_bincode_len,peak_ram_kb,avg_cpu_pct,max_cpu_pct
-        let timestamp_metrics = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let timestamp_metrics = Local::now().format("%d_%m_%y_%H_%M").to_string();
         let filename_metrics = format!("metrics/proving_metrics_{}.csv", timestamp_metrics);
         let mut file = File::options().append(true).create(true).open(&filename_metrics)?;
         if file.metadata()?.len() == 0 {
@@ -763,18 +1024,35 @@ fn generate_proof_for_backend(
         )?;
     }
 
-    println!("Prova generata: backend={}, seal_bytes={}, journal_bytes={}", backend_name, receipt.seal_size(), receipt.journal.bytes.len());
+    println!("Proof generated: backend={}, seal_bytes={}, journal_bytes={}", backend_name, receipt.seal_size(), receipt.journal.bytes.len());
     Ok(receipt)
 }
 
 
 
-// ##########################################################################
-// PROCEDURE DI VERIFICA 
-// ##########################################################################
+// ============================================================================
+// VERIFICATION PROCEDURES
+// ============================================================================
+//
+// This section contains functions for both off-chain and on-chain proof verification.
+// Off-chain verification uses the local RISC Zero verifier, while on-chain verification
+// submits transactions to an Ethereum smart contract.
 
-
-// Helper per trovare l'indirizzo del contratto deployato su Anvil
+/// Attempts to automatically discover the deployed contract address for Anvil.
+/// 
+/// This function searches Foundry's broadcast directory for the most recent deployment
+/// of the "Contract" contract on chain ID 31337 (Anvil's default). This enables
+/// automatic contract discovery without manual address configuration.
+/// 
+/// # Search Paths
+/// 
+/// - `broadcast/Deploy.s.sol/31337/run-latest.json`
+/// - `../broadcast/Deploy.s.sol/31337/run-latest.json`
+/// 
+/// # Returns
+/// 
+/// - `Some(Address)`: The contract address if found.
+/// - `None`: If no deployment record is found.
 fn find_anvil_contract_address() -> Option<Address> {
     let potential_paths = [
         "broadcast/Deploy.s.sol/31337/run-latest.json",
@@ -794,7 +1072,7 @@ fn find_anvil_contract_address() -> Option<Address> {
                                 if name == "Contract" {
                                     if let Some(addr_str) = tx.get("contractAddress").and_then(|v| v.as_str()) {
                                         if let Ok(addr) = Address::from_str(addr_str) {
-                                            println!("Indirizzo contratto Contract estratto: {}", addr);
+                                            println!("Contract address extracted: {}", addr);
                                             return Some(addr);
                                         }
                                     }
@@ -809,7 +1087,20 @@ fn find_anvil_contract_address() -> Option<Address> {
     None
 }
 
-// Helper per trovare l'indirizzo del contratto deployato su Sepolia
+/// Attempts to automatically discover the deployed contract address for Sepolia.
+/// 
+/// Similar to `find_anvil_contract_address`, but searches for deployments on
+/// chain ID 11155111 (Sepolia testnet).
+/// 
+/// # Search Paths
+/// 
+/// - `broadcast/Deploy.s.sol/11155111/run-latest.json`
+/// - `../broadcast/Deploy.s.sol/11155111/run-latest.json`
+/// 
+/// # Returns
+/// 
+/// - `Some(Address)`: The contract address if found.
+/// - `None`: If no deployment record is found.
 fn find_sepolia_contract_address() -> Option<Address> {
     let potential_paths = [
         "broadcast/Deploy.s.sol/11155111/run-latest.json",
@@ -829,7 +1120,7 @@ fn find_sepolia_contract_address() -> Option<Address> {
                                 if name == "Contract" {
                                     if let Some(addr_str) = tx.get("contractAddress").and_then(|v| v.as_str()) {
                                         if let Ok(addr) = Address::from_str(addr_str) {
-                                            println!("Indirizzo contratto Sepolia estratto da broadcast: {}", addr);
+                                            println!("Sepolia contract address extracted from broadcast: {}", addr);
                                             return Some(addr);
                                         }
                                     }
@@ -845,6 +1136,26 @@ fn find_sepolia_contract_address() -> Option<Address> {
 }
 
 
+/// Constructs a blockchain profile from CLI arguments and environment variables.
+/// 
+/// This function aggregates all network-specific configuration (chain ID, RPC URL,
+/// contract address, signer key) into a unified `ChainProfile`. It supports both
+/// Anvil (local) and Sepolia (testnet) networks.
+/// 
+/// # Configuration Sources
+/// 
+/// | Parameter | Anvil Source | Sepolia Source |
+/// |-----------|--------------|----------------|
+/// | Chain ID | Hardcoded (31337) | Hardcoded (11155111) |
+/// | RPC URL | Hardcoded (localhost:8545) | `SEPOLIA_RPC_URL` env or default |
+/// | Contract | Broadcast file or `CONTRACT_ADDRESS` env | Broadcast file, `SEPOLIA_CONTRACT_ADDRESS` env, or fallback |
+/// | Signer | Anvil Account 0 (deterministic) | `--wallet` CLI argument |
+/// 
+/// # Returns
+/// 
+/// - `Ok(Some(ChainProfile))`: Profile for on-chain verification.
+/// - `Ok(None)`: If verification mode is not on-chain.
+/// - `Err`: If required configuration is missing.
 fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
     
     if !matches!(cmd.verify, Some(VerifyMode::Onchain)) {
@@ -853,49 +1164,48 @@ fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
 
     let network = match cmd.network {
         Some(n) => n,
-        None => return Ok(None), // già validato prima
+        None => return Ok(None), // already validated
     };
 
     match network {
         Network::Anvil => {
-            // richiede variabili globali non ancora gestite: usiamo placeholder / default
-            // NOTA: qui in assenza di global flags usiamo default convenzionali
+            // Use conventional defaults for Anvil local development network
             let chain_id = 31337u64;
-            let rpc_url = Url::parse("http://localhost:8545").context("RPC URL default anvil non valido")?;
+            let rpc_url = Url::parse("http://localhost:8545").context("Invalid default Anvil RPC URL")?;
             
-            // Tenta di recuperare l'indirizzo automaticamente dal file di broadcast di Foundry
+            // Attempt to automatically retrieve the contract address from Foundry's broadcast file
             let contract = find_anvil_contract_address()
                 .or_else(|| std::env::var("CONTRACT_ADDRESS").ok().and_then(|s| Address::from_str(&s).ok()))
-                .context("Indirizzo contratto non trovato! Assicurati di aver fatto il deploy (broadcast/Deploy.s.sol/31337/run-latest.json) o imposta CONTRACT_ADDRESS.")?;
+                .context("Contract address not found! Ensure you have deployed (broadcast/Deploy.s.sol/31337/run-latest.json) or set CONTRACT_ADDRESS.")?;
 
-            println!("Contratto rilevato automaticamente: {}", contract);
+            println!("Contract automatically detected: {}", contract);
 
-            // private key: per anvil usiamo sempre la chiave di default (Account 0)
-            // Questa chiave è deterministica per la mnemonic di default di Anvil
+            // Private key: for Anvil, always use the default key (Account 0)
+            // This key is deterministic for Anvil's default mnemonic
             let signer_private_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".to_string();
             Ok(Some(ChainProfile::Anvil(AnvilConfig { chain_id, rpc_url, contract, signer_private_key })))
         }
         Network::Sepolia => {
             let chain_id = 11155111u64;
             
-            // Tenta di recuperare RPC URL da env, altrimenti usa default
+            // Attempt to retrieve RPC URL from env, otherwise use default
             let rpc_url_str = std::env::var("SEPOLIA_RPC_URL")
                 .unwrap_or_else(|_| "https://eth-sepolia.g.alchemy.com/v2/OKLxGgiSdmgSIz9G5FuKx".to_string());
-            let rpc_url = Url::parse(&rpc_url_str).context("RPC URL sepolia non valido")?;
+            let rpc_url = Url::parse(&rpc_url_str).context("Invalid Sepolia RPC URL")?;
 
-            // Tenta di recuperare l'indirizzo da env o broadcast, fallback hardcoded
+            // Attempt to retrieve address from env or broadcast, fallback to hardcoded
             let contract = std::env::var("SEPOLIA_CONTRACT_ADDRESS")
                 .ok()
                 .and_then(|s| Address::from_str(&s).ok())
                 .or_else(find_sepolia_contract_address)
                 .or_else(|| Address::from_str("0xb2a3D05EF6FBBbcd71933bb2239b5954D242f833").ok())
-                .context("Indirizzo contratto Sepolia non trovato! Imposta SEPOLIA_CONTRACT_ADDRESS o esegui il deploy.")?;
+                .context("Sepolia contract address not found! Set SEPOLIA_CONTRACT_ADDRESS or run the deploy.")?;
 
-            println!("Contratto Sepolia configurato: {}", contract);
+            println!("Sepolia contract configured: {}", contract);
             println!("RPC URL: {}", rpc_url);
 
-            // sepolia richiede --wallet (già validato) → qui lo recuperiamo
-            let wallet_private_key = cmd.wallet.clone().expect("wallet già validato ma assente");
+            // Sepolia requires --wallet (already validated) - retrieve it here
+            let wallet_private_key = cmd.wallet.clone().expect("wallet already validated but missing");
             Ok(Some(ChainProfile::Sepolia(SepoliaConfig { chain_id, rpc_url, contract, wallet_private_key })))
         }
     }
@@ -903,48 +1213,95 @@ fn build_chain_profile(cmd: &RunCmd) -> Result<Option<ChainProfile>> {
 
 
 
-//verifica on chain con file
- fn exec_verify_onchain_from_file(path: &str, profile: &ChainProfile, metrics: bool, n_runs: usize) {
-    println!("Caricamento prova da file: {}", path);
+/// Performs on-chain verification of a proof loaded from a file.
+/// 
+/// This function deserializes a receipt from the specified file path and submits
+/// it to the smart contract for verification. The transaction is broadcast to
+/// the network specified in the chain profile.
+/// 
+/// # Arguments
+/// 
+/// - `path`: Path to the serialized receipt file (bincode format).
+/// - `profile`: Network configuration (Anvil or Sepolia).
+/// - `metrics`: If true, records transaction metrics to CSV.
+/// - `n_runs`: Number of verification transactions to send (for benchmarking).
+/// 
+/// # File Format
+/// 
+/// The file must contain a `Receipt` serialized using bincode.
+/// These files are automatically created by `generate_proof_for_backend`.
+fn exec_verify_onchain_from_file(path: &str, profile: &ChainProfile, metrics: bool, n_runs: usize) {
+    println!("Loading proof from file: {}", path);
 
-    // Leggi il file
+    // Open and read the proof file
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Errore apertura file prova: {}", e);
+            eprintln!("Error opening proof file: {}", e);
             return;
         }
     };
     let mut buffer = Vec::new();
     if let Err(e) = file.read_to_end(&mut buffer) {
-        eprintln!("Errore lettura file prova: {}", e);
+        eprintln!("Error reading proof file: {}", e);
         return;
     }
 
-    // Deserializza la receipt
+    // Deserialize the receipt from bincode format
     let receipt: Receipt = match bincode::deserialize(&buffer) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Errore deserializzazione prova: {}", e);
+            eprintln!("Error deserializing proof: {}", e);
             return;
         }
     };
 
-    // Estrai info dal profilo
+    // Extract connection parameters from the chain profile
     let (rpc_url, contract_addr, key) = match profile {
         ChainProfile::Anvil(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.signer_private_key.clone()),
         ChainProfile::Sepolia(cfg) => (cfg.rpc_url.clone(), cfg.contract, cfg.wallet_private_key.clone()),
     };
 
     if let Err(e) = run_onchain_verification(&receipt, contract_addr, &key, rpc_url, metrics, n_runs) {
-        eprintln!("Errore durante la verifica on-chain: {:?}", e);
+        eprintln!("Error during on-chain verification: {:?}", e);
     } else {
-        println!("Verifica on-chain da file completata con successo.");
+        println!("On-chain verification from file completed successfully.");
     }
 }
 
 
 
+/// Core on-chain verification logic.
+/// 
+/// This function handles the complete lifecycle of submitting a proof to an
+/// Ethereum smart contract for verification:
+/// 
+/// 1. **Wallet Setup**: Initializes a signer from the provided private key.
+/// 2. **Seal Encoding**: Converts the receipt into the format expected by the verifier contract.
+/// 3. **Transaction Submission**: Calls the contract's `set(journal, seal)` function.
+/// 4. **Receipt Confirmation**: Waits for the transaction to be mined and retrieves the result.
+/// 5. **Metrics Recording**: Logs gas usage, timing, and success rate.
+/// 
+/// # Contract Interface
+/// 
+/// The function calls `set(bytes journal, bytes seal)` on the contract, which:
+/// - Verifies the RISC Zero proof using the on-chain verifier.
+/// - Stores the journal data if verification succeeds.
+/// - Reverts if verification fails.
+/// 
+/// # Arguments
+/// 
+/// - `receipt`: The cryptographic proof to verify.
+/// - `contract_address`: Address of the deployed verification contract.
+/// - `signer_key`: Private key for signing transactions (hex format).
+/// - `rpc_url`: Ethereum RPC endpoint.
+/// - `metrics`: If true, records detailed metrics.
+/// - `n_runs`: Number of transactions to send (for benchmarking throughput).
+/// 
+/// # Returns
+/// 
+/// - `Ok(())`: All transactions completed (check logs for individual success/failure).
+/// - `Err`: If wallet setup, encoding, or transaction submission fails.
 fn run_onchain_verification(
     receipt: &Receipt,
     contract_address: Address,
@@ -953,26 +1310,26 @@ fn run_onchain_verification(
     metrics: bool,
     n_runs: usize,
 ) -> Result<()> {
-    // Setup wallet e provider
+    // Initialize wallet and provider from the signer key
     let signer = PrivateKeySigner::from_str(signer_key)
-        .context("Chiave privata non valida")?;
+        .context("Invalid private key")?;
     let wallet = EthereumWallet::from(signer);
     let provider = ProviderBuilder::new()
         .wallet(wallet)
         .connect_http(rpc_url);
 
-    // Encode seal
-    let seal = encode_seal(receipt).context("Encoding seal fallito")?;
+    // Encode the cryptographic seal into the format expected by the verifier contract
+    let seal = encode_seal(receipt).context("Seal encoding failed")?;
     let journal = receipt.journal.bytes.clone();
 
-    // Setup contratto
+    // Initialize the contract interface
     let contract = IContract::new(contract_address, provider);
     
-    // Runtime per esecuzione async
+    // Create async runtime for blockchain interactions
     let runtime = tokio::runtime::Runtime::new()?;
 
-    // Setup metriche
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    // Setup metrics files
+    let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
     let mut tx_trace = if metrics {
         std::fs::create_dir_all("metrics")?;
         let filename = format!("metrics/tx_trace_metrics_{}.csv", timestamp);
@@ -1004,20 +1361,20 @@ fn run_onchain_verification(
     let mut gas_used = Vec::new();
     let mut gas_price = Vec::new();
     
-    println!("Avvio verifica on-chain ({} transazioni)...", n_runs);
+    println!("Starting on-chain verification ({} transactions)...", n_runs);
     for i in 0..n_runs {
-        // set(bytes journal, bytes seal)
+        // Call the contract's set(bytes journal, bytes seal) function
         let call_builder = contract.set(journal.clone().into(), seal.clone().into());
         
         let t_start = Instant::now();
         
-        // Invia transazione
+        // Send transaction
         let pending_tx = runtime.block_on(call_builder.send())
-            .context(format!("Errore invio transazione {}", i+1))?;
+            .context(format!("Error sending transaction {}", i+1))?;
             
-        // Attendi receipt
+        // Wait for transaction receipt
         let tx_receipt = runtime.block_on(pending_tx.get_receipt())
-            .context(format!("Errore recupero receipt transazione {}", i+1))?;
+            .context(format!("Error retrieving receipt for transaction {}", i+1))?;
             
         let duration_ms = t_start.elapsed().as_millis();
         let success = tx_receipt.status();
@@ -1058,19 +1415,45 @@ fn run_onchain_verification(
     Ok(())
 }
 
-// Helper function for verification logic
+/// Verifies a proof locally using the RISC Zero verifier.
+/// 
+/// Off-chain verification is fast and free, making it ideal for:
+/// - Development and debugging.
+/// - Pre-flight checks before on-chain submission.
+/// - Scenarios where on-chain attestation is not required.
+/// 
+/// # Verification Process
+/// 
+/// 1. Calls `receipt.verify(GUEST_ID)` to cryptographically verify the proof.
+/// 2. Checks that the proof was generated by the expected guest program (identified by `GUEST_ID`).
+/// 3. Validates the cryptographic seal against the journal contents.
+/// 
+/// # Arguments
+/// 
+/// - `receipt`: The proof to verify.
+/// - `source_label`: Descriptive label for the proof source (used in logging and metrics).
+/// - `metrics`: If true, records verification timing to CSV.
+/// 
+/// # Security Note
+/// 
+/// A successful off-chain verification guarantees that:
+/// - The guest program executed correctly with the journal as output.
+/// - The proof is cryptographically valid.
+/// 
+/// It does NOT provide on-chain attestation or prevent the prover from
+/// discarding invalid proofs before showing valid ones.
 fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool) {
-    println!("Avvio verifica off-chain (sorgente: {})...", source_label);
+    println!("Starting off-chain verification (source: {})...", source_label);
     let t_start = Instant::now();
     
     match receipt.verify(GUEST_ID) {
         Ok(()) => {
             let duration = t_start.elapsed().as_millis();
-            println!("Verifica off-chain completata con successo in {}ms", duration);
+            println!("Off-chain verification completed successfully in {}ms", duration);
             
             if metrics {
                  let _ = std::fs::create_dir_all("metrics");
-                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                 let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
                  let filename = format!("metrics/verify_offchain_metrics_{}.csv", timestamp);
                  if let Ok(mut f) = File::options().append(true).create(true).open(&filename) {
                     if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
@@ -1082,10 +1465,10 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
         },
         Err(e) => {
             let duration = t_start.elapsed().as_millis();
-            eprintln!("Verifica off-chain FALLITA: {:?}", e);
+            eprintln!("Off-chain verification FAILED: {:?}", e);
              if metrics {
                  let _ = std::fs::create_dir_all("metrics");
-                 let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                 let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
                  let filename = format!("metrics/verify_offchain_metrics_{}.csv", timestamp);
                  if let Ok(mut f) = File::options().append(true).create(true).open(&filename) {
                     if f.metadata().map(|m| m.len() == 0).unwrap_or(false) {
@@ -1098,26 +1481,26 @@ fn verify_receipt_offchain(receipt: &Receipt, source_label: &str, metrics: bool)
     }
 }
 
-// verifica offchain con file
+// Off-chain verification from file
 fn exec_verify_offchain_from_file_stub(path: &str, metrics: bool) {
-    println!("Caricamento prova da file: {}", path);
+    println!("Loading proof from file: {}", path);
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Errore apertura file prova: {}", e);
+            eprintln!("Error opening proof file: {}", e);
             return;
         }
     };
     let mut buffer = Vec::new();
     if let Err(e) = file.read_to_end(&mut buffer) {
-        eprintln!("Errore lettura file prova: {}", e);
+        eprintln!("Error reading proof file: {}", e);
         return;
     }
 
     let receipt: Receipt = match bincode::deserialize(&buffer) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Errore deserializzazione prova: {}", e);
+            eprintln!("Error deserializing proof: {}", e);
             return;
         }
     };
@@ -1125,10 +1508,10 @@ fn exec_verify_offchain_from_file_stub(path: &str, metrics: bool) {
     verify_receipt_offchain(&receipt, "file", metrics);
 }
 
-// verifica offchain con prova generata in questa sessione
+// Off-chain verification with proof generated in this session
 fn exec_verify_offchain_from_new_stub(receipts: &[(Backend, Receipt)], metrics: bool) {
     if receipts.is_empty() {
-        println!("Nessuna prova disponibile per la verifica off-chain.");
+        println!("No proof available for off-chain verification.");
         return;
     }
     for (backend, receipt) in receipts {
@@ -1137,7 +1520,7 @@ fn exec_verify_offchain_from_new_stub(receipts: &[(Backend, Receipt)], metrics: 
     }
 }
 
-// verifica onchain con prova generata in questa sessione
+// On-chain verification with proof generated in this session
 fn exec_verify_onchain_from_new_stub(
     receipt: Option<&Receipt>,
     profile: &ChainProfile,
@@ -1150,27 +1533,27 @@ fn exec_verify_onchain_from_new_stub(
     };
 
     if let Some(r) = receipt {
-        println!("Avvio verifica on-chain (Groth16)...");
+        println!("Starting on-chain verification (Groth16)...");
         if let Err(e) = run_onchain_verification(r, contract_addr, &key, rpc_url, metrics, n_runs) {
-            eprintln!("Errore durante la verifica on-chain: {:?}", e);
+            eprintln!("Error during on-chain verification: {:?}", e);
             return Err(e);
         }
-        println!("Verifica on-chain completata con successo.");
+        println!("On-chain verification completed successfully.");
         Ok(())
     } else {
-        anyhow::bail!("Nessuna prova Groth16 disponibile per la verifica on-chain");
+        anyhow::bail!("No Groth16 proof available for on-chain verification");
     }
 }
 
 
-//TODO MAIN FUN
+// Main entry point
 fn main() -> Result<()> {
 
-    // Acquisizione dei paramentri da riga di comando 
+    // Parse command line arguments
     let cli = Cli::parse();
     match cli.command {
         Commands::Run(RunCmd { input, session, prove, verify, network, source, proof_file, wallet, n_runs, metrics }) => {
-            // Validazioni incrociate delle combinazioni richieste
+            // Cross-validate required flag combinations
             validate_run(&RunCmd {
                 input: input.clone(),
                 session,
@@ -1184,32 +1567,32 @@ fn main() -> Result<()> {
                 metrics,
             })?;
 
-            // DEBUG: stampa dei parametri acquisiti da riga di comando
-            println!("Informazioni rilevate:");
+            // DEBUG: print acquired parameters from command line
+            println!("Detected configuration:");
             println!("Input: {:?}", input);
-            println!("Sessione: {}", session);
+            println!("Session: {}", session);
             let provers: Vec<&'static str> = prove
                 .iter()
                 .map(|backend| match backend { Backend::Stark => "stark", Backend::Groth16 => "groth16" })
                 .collect();
             println!("Prove backends: {:?}", provers);
-            println!("Verifica: {:?}", verify);
+            println!("Verify: {:?}", verify);
             println!("Network: {:?}", network);
             println!("Source: {:?}", source);
             println!("Proof file: {:?}", proof_file);
-            println!("Wallet: {}", if wallet.is_some() { "[acquisito]" } else { "-" });
-            println!("N. Transazioni: {}", n_runs);
-            println!("Metriche: {}", metrics);
+            println!("Wallet: {}", if wallet.is_some() { "[provided]" } else { "-" });
+            println!("N. Transactions: {}", n_runs);
+            println!("Metrics: {}", metrics);
 
-            // Parsing e validazione dell'input (se presente)
+            // Parse and validate input (if present)
             let typed_input_opt: Option<TypedInput> = match &input {
-                Some(spec) => Some(parse_typed_input(spec).map_err(|e| anyhow::anyhow!("Errore input: {}", e))?),
+                Some(spec) => Some(parse_typed_input(spec).map_err(|e| anyhow::anyhow!("Input error: {}", e))?),
                 None => None,
             };
 
             // Dispatcher stub (session, proving, verify)
 
-            // ABI encoding unico se serve (session o prove o source=new)
+            // Single ABI encoding if needed (session or prove or source=new)
             let encoded_input_opt: Option<Vec<u8>> = typed_input_opt.as_ref().map(|ti| match &ti.validated {
                 ValidatedSolData::Uint256(n) => n.abi_encode(),
                 ValidatedSolData::Uint256Triple(b,e,m) => (b.clone(),e.clone(),m.clone()).abi_encode(),
@@ -1217,14 +1600,14 @@ fn main() -> Result<()> {
                 ValidatedSolData::Bytes(b) => Bytes::from(b.clone()).abi_encode(),
                 ValidatedSolData::Bool(v) => v.abi_encode(),
                 ValidatedSolData::Address(a) => a.abi_encode(),
-                // bytesN va codificato come fixed-bytes (32) ABI word, non come bytes dinamici
+                // bytesN is encoded as fixed-bytes (32) ABI word, not as dynamic bytes
                 ValidatedSolData::BytesN(arr,_) => {
                     let mut padded = [0u8; 32];
                     let len = arr.len();
                     padded[..len].copy_from_slice(arr);
                     FixedBytes::<32>::from(padded).abi_encode()
                 },
-                // MerkleProof: ABI encode come (bytes32, bytes32[], bool[], bytes32)
+                // MerkleProof: ABI encode as (bytes32, bytes32[], bool[], bytes32)
                 ValidatedSolData::MerkleProof { leaf, siblings, directions, expected_root } => {
                     let leaf_fb = FixedBytes::<32>::from(*leaf);
                     let siblings_fb: Vec<FixedBytes<32>> = siblings.iter()
@@ -1235,7 +1618,7 @@ fn main() -> Result<()> {
                 },
             });
 
-            // generazione di una session
+            // Session generation
             if session {
                 if let (Some(encoded_input), Some(_ti)) = (&encoded_input_opt, &typed_input_opt) {
                     let original_spec = input.as_deref().unwrap_or("");
@@ -1243,7 +1626,7 @@ fn main() -> Result<()> {
                 }
             }
 
-            // generazione prove (sostituisce stub)
+            // Proof generation (replaces stub)
             let mut generated_receipts: Vec<(Backend, Receipt)> = Vec::new();
             let mut groth16_receipt: Option<Receipt> = None;
             if !prove.is_empty() {
@@ -1258,34 +1641,33 @@ fn main() -> Result<()> {
                 }
             }
             
-            // verifica di una prova
+            // Proof verification
             if let Some(vmode) = verify {
                 match (source, vmode) {
-                    // import della prova da locale
-                    // offchain
+                    // Import proof from file
+                    // Offchain
                     (Some(VerifySource::File), VerifyMode::Offchain) => {
                         if let Some(path) = &proof_file { exec_verify_offchain_from_file_stub(path, metrics); }
                     }
-                    // onchain
+                    // Onchain
                     (Some(VerifySource::File), VerifyMode::Onchain) => {
                         if let Some(path) = &proof_file {
                             let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
-                                .expect("Profilo onchain assente");
-//TODO
+                                .expect("On-chain profile missing");
                             exec_verify_onchain_from_file(path, &profile, metrics, n_runs);
                         }
                     }
-                    // prova generata nell'attuale esecuzione
-                    // offchain 
+                    // Proof generated in current execution
+                    // Offchain 
                     (Some(VerifySource::New), VerifyMode::Offchain) => {
-                        // Verifica locale tutte le prove appena generate (tutti i backend richiesti)
+                        // Local verification of all freshly generated proofs (all requested backends)
                         exec_verify_offchain_from_new_stub(&generated_receipts, metrics);
                     }
-                    // onchain (only groth16)
+                    // Onchain (only groth16)
                     (Some(VerifySource::New), VerifyMode::Onchain) => {
-                        // On-chain: verifica solo prove Groth16
+                        // On-chain: verify only Groth16 proofs
                         let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
-                            .expect("Profilo onchain assente");
+                            .expect("On-chain profile missing");
                         exec_verify_onchain_from_new_stub(groth16_receipt.as_ref(), &profile, metrics, n_runs)?;
                     }
                     _ => {}

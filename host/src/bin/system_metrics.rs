@@ -16,35 +16,36 @@ pub struct MetricsMonitor {
 }
 
 impl MetricsMonitor {
-    /// Avvia il monitoraggio delle risorse in un thread separato.
-    /// Ritorna un oggetto MetricsMonitor che controlla il thread.
+    /// Starts resource monitoring in a separate background thread.
+    ///
+    /// Returns a `MetricsMonitor` handle that controls the monitoring thread.
+    /// The thread samples CPU and RAM usage every 500ms until `stop()` is called.
     pub fn start() -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let r_clone = running.clone();
 
         let handle = thread::spawn(move || {
             let mut sys = System::new();
-            // Ottieni il PID del processo corrente
+            // Retrieve the current process PID for targeted monitoring
             let pid = Pid::from(std::process::id() as usize);
             
             let mut peak_ram = 0;
             let mut cpu_samples = Vec::new();
             let mut max_cpu = 0.0;
 
-            // Loop di monitoraggio
+            // Main monitoring loop: runs until stop signal is received
             while r_clone.load(Ordering::Relaxed) {
-                // Aggiorna solo le info del processo corrente per efficienza
-                // sysinfo v0.30+: refresh_processes con filtro
+                // Refresh only the current process info for efficiency (sysinfo v0.30+)
                 sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
                 
                 if let Some(process) = sys.process(pid) {
-                    // RAM (sysinfo restituisce Bytes, convertiamo in KB)
+                    // Track peak RAM usage (convert from bytes to KB)
                     let ram = process.memory() / 1024;
                     if ram > peak_ram {
                         peak_ram = ram;
                     }
 
-                    // CPU (%)
+                    // Track CPU usage percentage and collect samples for averaging
                     let cpu = process.cpu_usage();
                     if cpu > max_cpu {
                         max_cpu = cpu;
@@ -52,11 +53,11 @@ impl MetricsMonitor {
                     cpu_samples.push(cpu);
                 }
 
-                // Campionamento ogni 500ms
+                // Sampling interval: 500ms provides good granularity without overhead
                 thread::sleep(Duration::from_millis(500));
             }
 
-            // Calcolo media CPU
+            // Compute average CPU usage from collected samples
             let avg_cpu = if !cpu_samples.is_empty() {
                 cpu_samples.iter().sum::<f32>() / cpu_samples.len() as f32
             } else {
@@ -76,7 +77,10 @@ impl MetricsMonitor {
         }
     }
 
-    /// Ferma il monitoraggio e restituisce le metriche raccolte.
+    /// Stops the monitoring thread and returns the collected metrics.
+    ///
+    /// Consumes the monitor and waits for the background thread to terminate.
+    /// Returns a `SystemMetrics` struct containing peak RAM, average CPU, and max CPU.
     pub fn stop(mut self) -> SystemMetrics {
         self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {

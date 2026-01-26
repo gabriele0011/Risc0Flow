@@ -11,6 +11,7 @@ alloy-primitives = { workspace = true }
 anyhow = { workspace = true }
 alloy = { workspace = true }
 bincode = { workspace = true }
+chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
 hex = { workspace = true }
 risc0-ethereum-contracts = { workspace = true }
