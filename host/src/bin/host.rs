@@ -62,6 +62,17 @@ pub enum ValidatedSolData {
     Bool(bool),
     Address(Address),
     BytesN(Vec<u8>, usize), // (value, N) con 1<=N<=32
+    /// Merkle proof per proof-of-membership
+    /// leaf: hash della foglia (già pre-hashed)
+    /// siblings: array degli hash dei nodi fratelli lungo il path
+    /// directions: true = sibling a destra, false = sibling a sinistra
+    /// expected_root: root attesa dell'albero
+    MerkleProof {
+        leaf: [u8; 32],
+        siblings: Vec<[u8; 32]>,
+        directions: Vec<bool>,
+        expected_root: [u8; 32],
+    },
 }
 
 // Struttura per input tipizzato nel formato <type_data, data> 
@@ -427,9 +438,152 @@ pub fn parse_and_validate_typed(typedata: &str, data: &str) -> Result<ValidatedS
                 return Ok(ValidatedSolData::Address(addr));
             }
 
+            // merkle_proof: formato <merkle_proof; leaf=0x..., siblings=[0x...,0x...], directions=[l,r,...], root=0x...>
+            if typedata == "merkle_proof" {
+                return parse_merkle_proof(data);
+            }
+
             Err(ParseError::UnknownType(typedata.to_string()))
         },
     }
+}
+
+
+/// Parser specializzato per il tipo merkle_proof
+/// Formato: leaf=0x..., siblings=[0x...,0x...], directions=[l,r,...], root=0x...
+/// Dove directions: l/left/0 = sibling a sinistra, r/right/1 = sibling a destra
+fn parse_merkle_proof(data: &str) -> Result<ValidatedSolData, ParseError> {
+    // Helper per estrarre un valore da una chiave
+    fn extract_value<'a>(data: &'a str, key: &str) -> Option<&'a str> {
+        // Cerca "key=" nel data
+        let pattern = format!("{}=", key);
+        if let Some(start_idx) = data.find(&pattern) {
+            let value_start = start_idx + pattern.len();
+            let remaining = &data[value_start..];
+            
+            // Se inizia con '[', trova la ']' corrispondente
+            if remaining.starts_with('[') {
+                if let Some(end_idx) = remaining.find(']') {
+                    return Some(&remaining[..=end_idx]);
+                }
+            } else {
+                // Altrimenti prendi fino alla prossima virgola o fine stringa
+                let end_idx = remaining.find(',').unwrap_or(remaining.len());
+                return Some(remaining[..end_idx].trim());
+            }
+        }
+        None
+    }
+
+    // Helper per parsare un bytes32
+    fn parse_bytes32(hex_str: &str) -> Result<[u8; 32], ParseError> {
+        let hex_str = hex_str.trim();
+        if !hex_str.starts_with("0x") {
+            return Err(ParseError::InvalidDataFormat(
+                format!("bytes32 deve iniziare con 0x, trovato: '{}'", hex_str)
+            ));
+        }
+        let hex_part = &hex_str[2..];
+        if hex_part.len() != 64 {
+            return Err(ParseError::InvalidDataFormat(
+                format!("bytes32 richiede 64 caratteri hex, trovati {}", hex_part.len())
+            ));
+        }
+        let bytes = hex::decode(hex_part).map_err(|e| 
+            ParseError::InvalidDataFormat(format!("bytes32 hex non valido: {}", e))
+        )?;
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+
+    // Helper per parsare un array di bytes32
+    fn parse_bytes32_array(arr_str: &str) -> Result<Vec<[u8; 32]>, ParseError> {
+        let arr_str = arr_str.trim();
+        if !arr_str.starts_with('[') || !arr_str.ends_with(']') {
+            return Err(ParseError::InvalidDataFormat(
+                "Array siblings deve essere racchiuso tra [ e ]".to_string()
+            ));
+        }
+        let inner = &arr_str[1..arr_str.len()-1];
+        if inner.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let mut result = Vec::new();
+        for item in inner.split(',') {
+            let item = item.trim();
+            if !item.is_empty() {
+                result.push(parse_bytes32(item)?);
+            }
+        }
+        Ok(result)
+    }
+
+    // Helper per parsare un array di directions
+    fn parse_directions(arr_str: &str) -> Result<Vec<bool>, ParseError> {
+        let arr_str = arr_str.trim();
+        if !arr_str.starts_with('[') || !arr_str.ends_with(']') {
+            return Err(ParseError::InvalidDataFormat(
+                "Array directions deve essere racchiuso tra [ e ]".to_string()
+            ));
+        }
+        let inner = &arr_str[1..arr_str.len()-1];
+        if inner.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let mut result = Vec::new();
+        for item in inner.split(',') {
+            let item = item.trim().to_lowercase();
+            let dir = match item.as_str() {
+                "r" | "right" | "1" | "true" => true,   // sibling a destra
+                "l" | "left" | "0" | "false" => false,  // sibling a sinistra
+                _ => return Err(ParseError::InvalidDataFormat(
+                    format!("Direction non valida: '{}'. Usa l/left/0 o r/right/1", item)
+                )),
+            };
+            result.push(dir);
+        }
+        Ok(result)
+    }
+
+    // Estrai i campi richiesti
+    let leaf_str = extract_value(data, "leaf")
+        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'leaf' mancante".to_string()))?;
+    let siblings_str = extract_value(data, "siblings")
+        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'siblings' mancante".to_string()))?;
+    let directions_str = extract_value(data, "directions")
+        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'directions' mancante".to_string()))?;
+    let root_str = extract_value(data, "root")
+        .ok_or_else(|| ParseError::InvalidDataFormat("Campo 'root' mancante".to_string()))?;
+
+    // Parse dei singoli campi
+    let leaf = parse_bytes32(leaf_str)?;
+    let siblings = parse_bytes32_array(siblings_str)?;
+    let directions = parse_directions(directions_str)?;
+    let expected_root = parse_bytes32(root_str)?;
+
+    // Validazioni di consistenza
+    if siblings.len() != directions.len() {
+        return Err(ParseError::InvalidDataFormat(
+            format!("siblings ({}) e directions ({}) devono avere la stessa lunghezza", 
+                siblings.len(), directions.len())
+        ));
+    }
+
+    if siblings.is_empty() {
+        return Err(ParseError::InvalidDataFormat(
+            "Merkle proof deve avere almeno un sibling (profondità >= 1)".to_string()
+        ));
+    }
+
+    Ok(ValidatedSolData::MerkleProof {
+        leaf,
+        siblings,
+        directions,
+        expected_root,
+    })
 }
 
 
@@ -1069,6 +1223,15 @@ fn main() -> Result<()> {
                     let len = arr.len();
                     padded[..len].copy_from_slice(arr);
                     FixedBytes::<32>::from(padded).abi_encode()
+                },
+                // MerkleProof: ABI encode come (bytes32, bytes32[], bool[], bytes32)
+                ValidatedSolData::MerkleProof { leaf, siblings, directions, expected_root } => {
+                    let leaf_fb = FixedBytes::<32>::from(*leaf);
+                    let siblings_fb: Vec<FixedBytes<32>> = siblings.iter()
+                        .map(|s| FixedBytes::<32>::from(*s))
+                        .collect();
+                    let root_fb = FixedBytes::<32>::from(*expected_root);
+                    (leaf_fb, siblings_fb, directions.clone(), root_fb).abi_encode()
                 },
             });
 

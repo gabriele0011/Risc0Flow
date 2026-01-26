@@ -13,4 +13,3 @@ path = "src/bin/guest.rs"
 alloy-primitives = { version = "1.0", default-features = false, features = ["rlp", "serde", "std"] }
 alloy-sol-types = { version = "1.0" }
 risc0-zkvm = { version = "2.3.2", default-features = false, features = ['std'] }
-num-bigint = "0.4"
