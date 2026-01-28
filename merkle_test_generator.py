@@ -166,26 +166,56 @@ def print_proof(proof: dict):
     print(f"\ndirections={format_directions(proof['directions'])}")
     print(f"\nroot={format_bytes32(proof['root'])}")
 
-def generate_cargo_command(proof: dict) -> str:
+def generate_input_string(proof: dict) -> str:
     """
-    Generate a cargo run command for Groth16 proving with metrics.
+    Generate the input string for the host CLI.
     
     Args:
         proof: The generated Merkle proof.
     
     Returns:
-        Complete cargo command string.
+        Input string in the format expected by the host CLI.
     """
-    # Build the input string in the format expected by the host CLI
-    input_str = (
+    return (
         f"<merkle_proof; "
         f"leaf={format_bytes32(proof['leaf'])}, "
         f"siblings={format_siblings(proof['siblings'])}, "
         f"directions={format_directions(proof['directions'])}, "
         f"root={format_bytes32(proof['root'])}>"
     )
+
+
+def generate_cargo_command(proof: dict, input_file: str) -> list:
+    """
+    Generate a cargo run command for Groth16 proving with metrics.
     
-    return f"./target/release/host run --prove groth16 --input '{input_str}' --metrics"
+    Args:
+        proof: The generated Merkle proof.
+        input_file: Path to the temporary file containing the input string.
+    
+    Returns:
+        List of command arguments.
+    """
+    return [
+        "./target/release/host",
+        "run",
+        "--prove", "groth16",
+        "--input-file", input_file,
+        "--metrics"
+    ]
+
+
+def format_cargo_command(input_file: str) -> str:
+    """
+    Format the cargo command as a string for display purposes.
+    
+    Args:
+        input_file: Path to the input file.
+    
+    Returns:
+        Human-readable command string.
+    """
+    return f"./target/release/host run --prove groth16 --input-file '{input_file}' --metrics"
 
 def main():
     """
@@ -215,16 +245,33 @@ def main():
     # Print the proof details
     print_proof(proof)
     
-    # Print the cargo command
-    print(f"\n{'='*70}")
-    print("EXECUTING CARGO COMMAND")
-    print(f"{'='*70}\n")
+    # Write input to a temporary file to avoid argument length limits
+    import tempfile
+    import os
     
-    command = generate_cargo_command(proof)
-    print(f"$ {command}\n")
+    input_str = generate_input_string(proof)
     
-    # Execute the command
-    subprocess.run(command, shell=True)
+    # Create a temporary file in the current directory for the input
+    input_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".merkle_input.tmp")
+    with open(input_file, 'w') as f:
+        f.write(input_str)
+    
+    try:
+        # Print the cargo command
+        print(f"\n{'='*70}")
+        print("EXECUTING CARGO COMMAND")
+        print(f"{'='*70}\n")
+        
+        command = generate_cargo_command(proof, input_file)
+        print(f"$ {format_cargo_command(input_file)}\n")
+        print(f"(Input written to temporary file: {input_file})\n")
+        
+        # Execute the command
+        subprocess.run(command)
+    finally:
+        # Clean up the temporary file
+        if os.path.exists(input_file):
+            os.remove(input_file)
 
 
 if __name__ == "__main__":

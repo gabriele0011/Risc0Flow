@@ -330,8 +330,12 @@ enum Commands {
 #[derive(Args, Debug)]
 struct RunCmd {
     /// Input string: <type_1, ..., type_n; val_1, ..., val_n>
-    #[arg(long, value_name = "INPUT_SPEC")]
+    #[arg(long, value_name = "INPUT_SPEC", conflicts_with = "input_file")]
     input: Option<String>,
+
+    /// Path to file containing input string (alternative to --input for large inputs)
+    #[arg(long, value_name = "INPUT_FILE", conflicts_with = "input")]
+    input_file: Option<String>,
 
     /// Generate a session
     #[arg(long, default_value_t = false)]
@@ -1627,10 +1631,26 @@ fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run(RunCmd { input, session, prove, verify, network, source, proof_file, wallet, n_runs, metrics }) => {
+        Commands::Run(RunCmd { input, input_file, session, prove, verify, network, source, proof_file, wallet, n_runs, metrics }) => {
+            // Resolve input: either from --input or --input-file
+            let resolved_input: Option<String> = match (&input, &input_file) {
+                (Some(i), None) => Some(i.clone()),
+                (None, Some(path)) => {
+                    let mut file = File::open(path)
+                        .map_err(|e| anyhow::anyhow!("Failed to open input file '{}': {}", path, e))?;
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents)
+                        .map_err(|e| anyhow::anyhow!("Failed to read input file '{}': {}", path, e))?;
+                    Some(contents.trim().to_string())
+                },
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents this"),
+            };
+
             // Cross-validate required flag combinations
             validate_run(&RunCmd {
-                input: input.clone(),
+                input: resolved_input.clone(),
+                input_file: None, // Already resolved above
                 session,
                 prove: prove.clone(),
                 verify,
@@ -1644,7 +1664,7 @@ fn main() -> Result<()> {
 
             // DEBUG: print acquired parameters from command line
             println!("Detected configuration:");
-            println!("Input: {:?}", input);
+            println!("Input: {:?}", resolved_input);
             println!("Session: {}", session);
             let provers: Vec<&'static str> = prove
                 .iter()
@@ -1660,7 +1680,7 @@ fn main() -> Result<()> {
             println!("Metrics: {}", metrics);
 
             // Parse and validate input (if present)
-            let typed_input_opt: Option<TypedInput> = match &input {
+            let typed_input_opt: Option<TypedInput> = match &resolved_input {
                 Some(spec) => Some(parse_typed_input(spec).map_err(|e| anyhow::anyhow!("Input error: {}", e))?),
                 None => None,
             };
@@ -1728,7 +1748,7 @@ fn main() -> Result<()> {
                     // Onchain
                     (Some(VerifySource::File), VerifyMode::Onchain) => {
                         if let Some(path) = &proof_file {
-                            let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
+                            let profile = build_chain_profile(&RunCmd { input: input.clone(), input_file: None, session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
                                 .expect("On-chain profile missing");
                             exec_verify_onchain_from_file(path, &profile, metrics, n_runs);
                         }
@@ -1745,7 +1765,7 @@ fn main() -> Result<()> {
                     // Onchain (only groth16)
                     (Some(VerifySource::New), VerifyMode::Onchain) => {
                         // On-chain: verify only Groth16 proofs
-                        let profile = build_chain_profile(&RunCmd { input: input.clone(), session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
+                        let profile = build_chain_profile(&RunCmd { input: input.clone(), input_file: None, session, prove: prove.clone(), verify, network, source, proof_file: proof_file.clone(), wallet: wallet.clone(), n_runs, metrics })?
                             .expect("On-chain profile missing");
                         if let Some(encoded_input) = &encoded_input_opt {
                             let input_hash = compute_input_hash(encoded_input);
