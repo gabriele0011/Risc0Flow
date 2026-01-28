@@ -158,13 +158,7 @@ def print_proof(proof: dict):
     Args:
         proof: Dictionary containing the proof data.
     """
-    print(f"\n{'='*70}")
-    print(f"MERKLE PROOF (depth: {proof['depth']}, tree can hold {2**proof['depth']} leaves)")
-    print(f"{'='*70}")
-    print(f"\nleaf={format_bytes32(proof['leaf'])}")
-    print(f"\nsiblings={format_siblings(proof['siblings'])}")
-    print(f"\ndirections={format_directions(proof['directions'])}")
-    print(f"\nroot={format_bytes32(proof['root'])}")
+    pass  # Output minimizzato: nessuna stampa
 
 def generate_input_string(proof: dict) -> str:
     """
@@ -201,6 +195,10 @@ def generate_cargo_command(proof: dict, input_file: str) -> list:
         "run",
         "--prove", "groth16",
         "--input-file", input_file,
+        "--verify", "onchain",
+        "--network", "sepolia",
+        "--source", "new",
+        "--n-runs", "20",
         "--metrics"
     ]
 
@@ -242,47 +240,25 @@ def main():
     # Generate the proof
     proof = generate_merkle_proof(depth)
     
-    # Print the proof details
-    print_proof(proof)
+    # Output minimizzato: nessuna stampa della proof
     
     # Write input to a temporary file to avoid argument length limits
     import tempfile
     import os
-    
+
     input_str = generate_input_string(proof)
-    
+
     # Create a temporary file in the current directory for the input
     input_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".merkle_input.tmp")
-    print(f"DEBUG: Creating input file at: {os.path.abspath(input_file)}")
     with open(input_file, 'w') as f:
         f.write(input_str)
         f.flush()  # Ensure data is written to disk
-    
-    # DEBUG: Verify the file was written correctly
-    with open(input_file, 'r') as f:
-        written_content = f.read()
-    print(f"DEBUG: Input file '{input_file}' contains: '{written_content}'")
-    if written_content.strip() != input_str.strip():
-        print(f"ERROR: Written content differs from expected input!")
-        print(f"Expected: '{input_str}'")
-        print(f"Written: '{written_content}'")
-    
-    try:
-        # Print the cargo command
-        print(f"\n{'='*70}")
-        print("EXECUTING CARGO COMMAND")
-        print(f"{'='*70}\n")
-        
-        command = generate_cargo_command(proof, input_file)
-        print(f"$ {format_cargo_command(input_file)}\n")
-        print(f"(Input written to temporary file: {input_file})\n")
-        
-        # Execute the command
-        subprocess.run(command)
-    finally:
-        # Clean up the temporary file
-        if os.path.exists(input_file):
-            os.remove(input_file)
+
+    # Esegui il comando host in modalità asincrona, senza attendere la fine
+    import subprocess
+    command = generate_cargo_command(proof, input_file)
+    subprocess.run(command)
+    # La pulizia del file temporaneo è ora manuale
 
 
 if __name__ == "__main__":
