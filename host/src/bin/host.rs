@@ -854,6 +854,7 @@ fn save_input_reference(input_hash: &str, input_spec: &str) {
     
     // Only write if file doesn't exist (same input = same hash = same content)
     if !path.exists() {
+        println!("DEBUG: saving input_hash={}, input_spec='{}'", input_hash, input_spec);
         let content = format!("input_id,input_spec\n{},{}", input_hash, input_spec);
         let _ = std::fs::write(&filename, content);
     }
@@ -913,6 +914,7 @@ pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool)
         
         // Compute input hash and save reference file
         let input_hash = compute_input_hash(encoded_input);
+        println!("DEBUG: input_label = '{}'", input_label);
         save_input_reference(&input_hash, input_label);
         
         let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
@@ -1716,7 +1718,7 @@ fn main() -> Result<()> {
             // Session generation
             if session {
                 if let (Some(encoded_input), Some(_ti)) = (&encoded_input_opt, &typed_input_opt) {
-                    let original_spec = input.as_deref().unwrap_or("");
+                    let original_spec = resolved_input.as_deref().unwrap_or("");
                     let _session = exec_session_stub(encoded_input, original_spec, metrics)?;
                 }
             }
@@ -1726,7 +1728,7 @@ fn main() -> Result<()> {
             let mut groth16_receipt: Option<Receipt> = None;
             if !prove.is_empty() {
                 if let (Some(encoded_input), Some(_ti)) = (&encoded_input_opt, &typed_input_opt) {
-                    let original_spec = input.as_deref().unwrap_or("");
+                    let original_spec = resolved_input.as_deref().unwrap_or("");
                     for backend in &prove {
                        let receipt = generate_proof_for_backend(*backend, encoded_input, original_spec, metrics)?;
                         if *backend == Backend::Groth16 {   

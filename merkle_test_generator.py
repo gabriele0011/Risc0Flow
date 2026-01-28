@@ -215,7 +215,7 @@ def format_cargo_command(input_file: str) -> str:
     Returns:
         Human-readable command string.
     """
-    return f"./target/release/host run --prove groth16 --input-file '{input_file}' --metrics"
+    return f"./target/release/host run --prove groth16 --input-file '{input_file}' verify sepolia --wallet 4d71469637941193a58b47867a386ad3a587b0973942cc2b77aef5072ac53b24 --metrics"
 
 def main():
     """
@@ -253,8 +253,19 @@ def main():
     
     # Create a temporary file in the current directory for the input
     input_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".merkle_input.tmp")
+    print(f"DEBUG: Creating input file at: {os.path.abspath(input_file)}")
     with open(input_file, 'w') as f:
         f.write(input_str)
+        f.flush()  # Ensure data is written to disk
+    
+    # DEBUG: Verify the file was written correctly
+    with open(input_file, 'r') as f:
+        written_content = f.read()
+    print(f"DEBUG: Input file '{input_file}' contains: '{written_content}'")
+    if written_content.strip() != input_str.strip():
+        print(f"ERROR: Written content differs from expected input!")
+        print(f"Expected: '{input_str}'")
+        print(f"Written: '{written_content}'")
     
     try:
         # Print the cargo command
