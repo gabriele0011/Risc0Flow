@@ -4,6 +4,7 @@
 
 It is conceived as an **operations toolkit** that can be executed individually, combined into a single continuous flow, or decoupled.
 
+
 ## 🚀 Key Features
 
 - **Modular Architecture**: Run sessions, proving, and verification independently or combined.
@@ -12,6 +13,7 @@ It is conceived as an **operations toolkit** that can be executed individually, 
 - **Integrated On-Chain Verification**: Native interaction with Ethereum (Anvil, Sepolia) via Alloy.
 - **Detailed Metrics**: Optional export (`--metrics`) of CSV files for performance analysis (time, RAM, CPU, Gas) across various phases.
 
+
 ## 🧩 Modular Architecture
 
 The framework is designed to adapt to any need, allowing for both linear and granular execution:
@@ -19,6 +21,7 @@ The framework is designed to adapt to any need, allowing for both linear and gra
 1.  **Session & Debugging (`--session`)**: Executes only the guest program written in Rust.
 2.  **Proving (`--prove`)**: Generates proofs (STARK/Groth16). It can be executed as an intermediate step (saving the proof to disk) or as part of a continuous pipeline.
 3.  **Verification (`--verify`)**: Validates the proof off-chain or on-chain. This can happen immediately after the generation phase or at a later time by loading the file (corresponding to the exported proof) from disk.
+
 
 ## � Getting Started — Step by Step
 
@@ -98,6 +101,7 @@ cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --sou
 
 > **Tip:** Add `--metrics` to any command to export CSV performance data to the `metrics/` folder.
 
+
 ## 📖 Usage Scenarios
 
 ### 1. Rapid Development (Guest logic only)
@@ -133,12 +137,13 @@ Run multiple verifications to test contract stability or calculate average gas.
 cargo run --release --bin host -- run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10 --metrics
 ```
 
-## ️ Deploy
+## 📡 Deploy
 
 The repository includes Bash scripts to simplify the deployment of verification contracts:
 
 - **`deploy_anvil.sh`**: Starts a local Anvil node (if not active) and deploys the contract.
 - **`deploy_sepolia.sh`**: Deploys the contract to the Sepolia testnet. Requires an Alchemy API key and a wallet private key (prompted interactively).
+
 
 ## 📊 Metrics
 
@@ -147,6 +152,7 @@ If enabled via the `--metrics` flag, all execution data is automatically saved i
 - `proving_metrics_*.csv`: Proving times, RAM/CPU usage, proof sizes.
 - `tx_trace_metrics_*.csv`: Transaction hashes, gas used, gas price, and success status.
 - `verify_metrics_*.csv`: Aggregate on-chain verification statistics (average gas, average time, success rate).
+
 
 ## 🛠️ Custom Development (Guest Code)
 
