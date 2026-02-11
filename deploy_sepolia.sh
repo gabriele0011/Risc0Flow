@@ -7,9 +7,9 @@ echo "=========================================="
 echo ""
 
 # Check and request required environment variables
-if [ -z "$ALCHEMY_API_KEY" ]; then
-    read -p "Enter your Alchemy API Key: " ALCHEMY_API_KEY
-    export ALCHEMY_API_KEY
+if [ -z "$API_KEY" ]; then
+    read -p "Enter your Alchemy API Key: " API_KEY
+    export API_KEY
 fi
 
 if [ -z "$ETH_WALLET_PRIVATE_KEY" ]; then
@@ -20,7 +20,7 @@ fi
 
 echo ""
 echo "Configuration:"
-echo "  - Alchemy API Key: ${ALCHEMY_API_KEY:0:8}..."
+echo "  - Alchemy API Key: ${API_KEY:0:8}..."
 echo "  - Private Key:     [hidden]"
 echo ""
 
@@ -34,7 +34,7 @@ echo ""
 echo "Deploying contract to Sepolia..."
 
 # Deploy contract
-forge script script/Deploy.s.sol --rpc-url https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY} --broadcast
+forge script script/Deploy.s.sol --rpc-url https://eth-sepolia.g.alchemy.com/v2/${API_KEY} --broadcast
 
 # Extract contract address from deploy log
 export CONTRACT_ADDRESS=$(jq -re '.transactions[] | select(.contractName == "Contract") | .contractAddress' ./broadcast/Deploy.s.sol/11155111/run-latest.json 2>/dev/null || echo "")

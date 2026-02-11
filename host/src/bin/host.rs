@@ -25,19 +25,6 @@
 //!
 //! ## Architecture Overview
 //!
-//! 
-//! ┌──────────────────────────────────────────────────────────────────────────────┐
-//! │                            HOST APPLICATION                                  │
-//! ├──────────────────────────────────────────────────────────────────────────────┤
-//! │                                                                              │
-//! │   CLI Input ──► Validator ──► ABI Encoder ──► Guest Executor (zkVM)          │
-//! │                                                      │                       │
-//! │                                                      ▼                       │
-//! │   Verifier (offchain/onchain) ◄── Proof Generator (STARK/Groth16)            │
-//! │                                                                              │
-//! └──────────────────────────────────────────────────────────────────────────────┘
-//!
-//!
 //! ## Supported Data Types
 //!
 //! The host supports Solidity-compatible ABI encoding for the following types:
