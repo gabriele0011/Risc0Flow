@@ -4,6 +4,7 @@
 
 It is conceived as an **operations toolkit** that can be executed individually, combined into a single continuous flow, or decoupled.
 
+<br>
 
 ## 🚀 Key Features
 
@@ -13,6 +14,7 @@ It is conceived as an **operations toolkit** that can be executed individually, 
 - **Integrated On-Chain Verification**: Native interaction with Ethereum (Anvil, Sepolia) via Alloy.
 - **Detailed Metrics**: Optional export (`--metrics`) of CSV files for performance analysis (time, RAM, CPU, Gas) across various phases.
 
+<br>
 
 ## 🧩 Modular Architecture
 
@@ -22,6 +24,7 @@ The framework is designed to adapt to any need, allowing for both linear and gra
 2.  **Proving (`--prove`)**: Generates proofs (STARK/Groth16). It can be executed as an intermediate step (saving the proof to disk) or as part of a continuous pipeline.
 3.  **Verification (`--verify`)**: Validates the proof off-chain or on-chain. This can happen immediately after the generation phase or at a later time by loading the file (corresponding to the exported proof) from disk.
 
+<br>
 
 ## � Getting Started — Step by Step
 
@@ -45,7 +48,9 @@ RISC0_USE_DOCKER=1 cargo build --release
 >
 > **`RISC0_USE_DOCKER=1`** ensures the guest binary is built inside a Docker container, producing a deterministic `ImageID`. This is **required** for on-chain verification (the `ImageID` must match exactly). You can omit it for local-only or off-chain workflows.
 >
-> **Important:** Always use `--release` for proving and verification workloads. Debug mode (`cargo build` / `cargo run` without `--release`) is orders of magnitude slower and should only be used for quick compilation checks during development.
+> **Development tip:** Use `cargo check` for the fastest feedback loop (no binaries produced), `cargo build` for quick debug builds, and `cargo build --release` when you're ready to run proving or verification workloads — debug mode is orders of magnitude slower.
+>
+> After building, the binary is available at `./target/release/host`. All commands below use it directly to avoid the overhead of `cargo run` (which re-checks compilation on every invocation).
 
 ### Step 2 — (Optional) Deploy the Verification Contracts
 
@@ -69,51 +74,52 @@ Use the `host` binary with the appropriate flags depending on your workflow.
 
 **Session only (test the guest logic):**
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --session
+./target/release/host run --input '<u256; 42>' --session
 ```
 
 **Generate a proof (STARK or Groth16):**
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove stark
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16
+./target/release/host run --input '<u256; 42>' --prove stark
+./target/release/host run --input '<u256; 42>' --prove groth16
 # Output saved in: proofs/receipt_<backend>_<timestamp>.bin
 ```
 
 **Off-chain verification (from a saved proof):**
 ```bash
-cargo run --release --bin host -- run --source file --proof-file proofs/receipt_stark_<timestamp>.bin --verify offchain
+./target/release/host run --source file --proof-file proofs/receipt_stark_<timestamp>.bin --verify offchain
 ```
 
 **On-chain verification (Anvil):**
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network anvil
+./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network anvil
 ```
 
 **On-chain verification (Sepolia):**
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
+./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
 ```
 
 **Full pipeline with metrics:**
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network anvil --metrics
+./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network anvil --metrics
 ```
 
 > **Tip:** Add `--metrics` to any command to export CSV performance data to the `metrics/` folder.
 
+<br>
 
 ## 📖 Usage Scenarios
 
 ### 1. Rapid Development (Guest logic only)
 Verify that the guest Rust code works correctly.
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --session
+./target/release/host run --input '<u256; 42>' --session
 ```
 
 ### 2. Full Pipeline (All-in-One)
 Generate the proof and verify on-chain.
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
+./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
 ```
 
 ### 3. Decoupled Workflow (Remote Proving / Deferred Verification)
@@ -121,21 +127,23 @@ cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16 --sou
 **Step A: Generation**
 Generate the proof and export it to a binary file.
 ```bash
-cargo run --release --bin host -- run --input '<u256; 42>' --prove groth16
+./target/release/host run --input '<u256; 42>' --prove groth16
 # Output saved in: proofs/receipt_groth16_<timestamp>.bin
 ```
 
 **Step B: Verification**
 Take the generated file and verify the relative proof on-chain.
 ```bash
-cargo run --release --bin host -- run --source file --proof-file proofs/receipt_groth16_<timestamp>.bin --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
+./target/release/host run --source file --proof-file proofs/receipt_groth16_<timestamp>.bin --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
 ```
 
 ### 4. On-Chain Stress Test
 Run multiple verifications to test contract stability or calculate average gas.
 ```bash
-cargo run --release --bin host -- run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10 --metrics
+./target/release/host run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10 --metrics
 ```
+
+<br>
 
 ## 📡 Deploy
 
@@ -144,6 +152,7 @@ The repository includes Bash scripts to simplify the deployment of verification 
 - **`deploy_anvil.sh`**: Starts a local Anvil node (if not active) and deploys the contract.
 - **`deploy_sepolia.sh`**: Deploys the contract to the Sepolia testnet. Requires an Alchemy API key and a wallet private key (prompted interactively).
 
+<br>
 
 ## 📊 Metrics
 
@@ -153,6 +162,7 @@ If enabled via the `--metrics` flag, all execution data is automatically saved i
 - `tx_trace_metrics_*.csv`: Transaction hashes, gas used, gas price, and success status.
 - `verify_metrics_*.csv`: Aggregate on-chain verification statistics (average gas, average time, success rate).
 
+<br>
 
 ## 🛠️ Custom Development (Guest Code)
 
