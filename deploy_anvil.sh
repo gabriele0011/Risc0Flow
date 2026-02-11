@@ -2,7 +2,7 @@
 set -e
 
 # 1. Avvia Anvil solo se non è già in esecuzione
-if pgrep -f anvil > /dev/null; then
+if pgrep -x anvil > /dev/null; then
   echo "[INFO] Anvil già in esecuzione"
 else
   echo "[INFO] Avvio anvil..."
