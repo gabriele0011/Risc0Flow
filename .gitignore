@@ -19,6 +19,9 @@ metrics/
 .env
 .env_vars
 
+# Logs
+anvil.log
+
 # Editor / OS
 .idea/
 .vscode/
