@@ -841,7 +841,6 @@ fn save_input_reference(input_hash: &str, input_spec: &str) {
     
     // Only write if file doesn't exist (same input = same hash = same content)
     if !path.exists() {
-        println!("DEBUG: saving input_hash={}, input_spec='{}'", input_hash, input_spec);
         let content = format!("input_id,input_spec\n{},{}", input_hash, input_spec);
         let _ = std::fs::write(&filename, content);
     }
@@ -901,7 +900,6 @@ pub fn exec_session_stub(encoded_input: &[u8], input_label: &str, metrics: bool)
         
         // Compute input hash and save reference file
         let input_hash = compute_input_hash(encoded_input);
-        println!("DEBUG: input_label = '{}'", input_label);
         save_input_reference(&input_hash, input_label);
         
         let timestamp = Local::now().format("%d_%m_%y_%H_%M").to_string();
@@ -1424,50 +1422,96 @@ fn run_onchain_verification(
 
     let mut times = Vec::new();
     let mut successes = 0;
+    let mut failures = 0;
     let mut gas_used = Vec::new();
     let mut gas_price = Vec::new();
     
-    println!("Starting on-chain verification ({} transactions)...", n_runs);
+    const MAX_RETRIES: u32 = 3;
+    const BASE_RETRY_DELAY_SECS: u64 = 2;
+
+    println!("Starting on-chain verification ({} transactions, up to {} retries each)...", n_runs, MAX_RETRIES);
     for i in 0..n_runs {
-        // Call the contract's set(bytes journal, bytes seal) function
-        let call_builder = contract.set(journal.clone().into(), seal.clone().into());
-        
         let t_start = Instant::now();
-        
-        // Send transaction
-        let pending_tx = runtime.block_on(call_builder.send())
-            .context(format!("Error sending transaction {}", i+1))?;
-            
-        // Wait for transaction receipt
-        let tx_receipt = runtime.block_on(pending_tx.get_receipt())
-            .context(format!("Error retrieving receipt for transaction {}", i+1))?;
-            
+
+        // Attempt to send and confirm the transaction with exponential backoff
+        let tx_result: Result<alloy::rpc::types::TransactionReceipt, anyhow::Error> = (|| {
+            for attempt in 1..=MAX_RETRIES {
+                // Build a fresh call for each attempt
+                let call_builder = contract.set(journal.clone().into(), seal.clone().into());
+
+                match runtime.block_on(call_builder.send()) {
+                    Ok(pending_tx) => {
+                        match runtime.block_on(pending_tx.get_receipt()) {
+                            Ok(receipt) => return Ok(receipt),
+                            Err(e) if attempt < MAX_RETRIES => {
+                                let delay = BASE_RETRY_DELAY_SECS * 2u64.pow(attempt - 1);
+                                eprintln!("  Tx {}/{} attempt {}/{} failed (get_receipt): {}. Retrying in {}s...",
+                                    i+1, n_runs, attempt, MAX_RETRIES, e, delay);
+                                std::thread::sleep(std::time::Duration::from_secs(delay));
+                            }
+                            Err(e) => return Err(anyhow::anyhow!(e)
+                                .context(format!("Error retrieving receipt for transaction {} after {} attempts", i+1, MAX_RETRIES))),
+                        }
+                    }
+                    Err(e) if attempt < MAX_RETRIES => {
+                        let delay = BASE_RETRY_DELAY_SECS * 2u64.pow(attempt - 1);
+                        eprintln!("  Tx {}/{} attempt {}/{} failed (send): {}. Retrying in {}s...",
+                            i+1, n_runs, attempt, MAX_RETRIES, e, delay);
+                        std::thread::sleep(std::time::Duration::from_secs(delay));
+                    }
+                    Err(e) => return Err(anyhow::anyhow!(e)
+                        .context(format!("Error sending transaction {} after {} attempts", i+1, MAX_RETRIES))),
+                }
+            }
+            unreachable!()
+        })();
+
         let duration_ms = t_start.elapsed().as_millis();
-        let success = tx_receipt.status();
-        
-        if success { successes += 1; }
-        
-        let g_used = tx_receipt.gas_used;
-        let g_price = tx_receipt.effective_gas_price;
-        
-        times.push(duration_ms);
-        gas_used.push(g_used);
-        gas_price.push(g_price);
 
-        println!("Tx {}/{}: hash={:?}, success={}, gas={}, time={}ms", 
-            i+1, n_runs, tx_receipt.transaction_hash, success, g_used, duration_ms);
+        match tx_result {
+            Ok(tx_receipt) => {
+                let success = tx_receipt.status();
+                if success { successes += 1; }
 
-        if let Some(ref mut f) = tx_trace {
-            writeln!(f, "{},{:?},{},{},{},{},{}",
-                input_id,
-                tx_receipt.transaction_hash,
-                g_used,
-                g_price,
-                tx_receipt.block_number.unwrap_or_default(),
-                duration_ms,
-                success
-            )?;
+                let g_used = tx_receipt.gas_used;
+                let g_price = tx_receipt.effective_gas_price;
+
+                times.push(duration_ms);
+                gas_used.push(g_used);
+                gas_price.push(g_price);
+
+                println!("Tx {}/{}: hash={:?}, success={}, gas={}, time={}ms",
+                    i+1, n_runs, tx_receipt.transaction_hash, success, g_used, duration_ms);
+
+                if let Some(ref mut f) = tx_trace {
+                    writeln!(f, "{},{:?},{},{},{},{},{}",
+                        input_id,
+                        tx_receipt.transaction_hash,
+                        g_used,
+                        g_price,
+                        tx_receipt.block_number.unwrap_or_default(),
+                        duration_ms,
+                        success
+                    )?;
+                }
+            }
+            Err(e) => {
+                failures += 1;
+                eprintln!("Tx {}/{}: FAILED after {} attempts: {:?} (time={}ms)",
+                    i+1, n_runs, MAX_RETRIES, e, duration_ms);
+
+                if let Some(ref mut f) = tx_trace {
+                    writeln!(f, "{},FAILED,0,0,0,{},false", input_id, duration_ms)?;
+                }
+            }
         }
+    }
+
+    // Summary
+    println!("\nVerification summary: {}/{} succeeded, {}/{} failed",
+        successes, n_runs, failures, n_runs);
+    if failures > 0 {
+        eprintln!("Warning: {} transaction(s) failed after {} retries each.", failures, MAX_RETRIES);
     }
 
     if let Some(ref mut f) = verify_metrics_log {
