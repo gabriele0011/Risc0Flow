@@ -20,7 +20,6 @@ Note:
 """
 
 import hashlib
-import secrets
 import sys
 import random
 import subprocess
@@ -41,12 +40,12 @@ def sha256(data: bytes) -> bytes:
 
 def random_bytes32() -> bytes:
     """
-    Generate 32 cryptographically secure random bytes.
+    Generate 32 deterministic random bytes (seeded by tree depth).
     
     Returns:
         32-byte random value (suitable for use as hash).
     """
-    return secrets.token_bytes(32)
+    return random.randbytes(32)
 
 def generate_merkle_proof(depth: int) -> dict:
     """
@@ -77,6 +76,9 @@ def generate_merkle_proof(depth: int) -> dict:
     """
     if depth < 1:
         raise ValueError("Depth must be at least 1")
+    
+    # Seed the RNG with the depth for deterministic output
+    random.seed(depth)
     
     # Generate random leaf (pre-hashed, as expected by the guest)
     leaf = random_bytes32()
@@ -193,13 +195,13 @@ def generate_cargo_command(proof: dict, input_file: str) -> list:
     return [
         "./target/release/host",
         "run",
-        "--prove", "groth16",
         "--input-file", input_file,
+        "--session",
+        "--prove", "groth16",
         "--verify", "onchain",
-        "--network", "sepolia",
+        "--network", "anvil",
         "--source", "new",
         "--n-runs", "1",
-        "--wallet", "",
         "--metrics"
     ]
 
