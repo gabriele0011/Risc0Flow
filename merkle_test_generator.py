@@ -199,7 +199,7 @@ def generate_cargo_command(proof: dict, input_file: str) -> list:
         "--network", "sepolia",
         "--source", "new",
         "--n-runs", "1",
-        "--wallet", "4d71469637941193a58b47867a386ad3a587b0973942cc2b77aef5072ac53b24",
+        "--wallet", "",
         "--metrics"
     ]
 
@@ -264,3 +264,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
