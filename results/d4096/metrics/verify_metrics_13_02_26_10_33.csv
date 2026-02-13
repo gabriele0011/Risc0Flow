@@ -1,0 +1,2 @@
+input_id,avg_gas_used,avg_gas_price,avg_time_ms,success_pct
+proofs/receipt_groth16_0243c871_13_02_26_10_33.bin,291769,2288885373,12688,100.00

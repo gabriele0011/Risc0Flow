@@ -1,0 +1,2 @@
+input_id,backend,phase,time_ms,seal_size,journal_len,receipt_bincode_len,peak_ram_kb,avg_cpu_pct,max_cpu_pct,max_threads
+f842406f,stark,prove,1012543,222668,224,223674,9601764,679.52,800.00,9
