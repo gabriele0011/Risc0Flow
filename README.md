@@ -170,4 +170,8 @@ For a complete description of every column, unit, and collection method, see [ME
 
 For details on how to write and integrate your application logic into the Guest, consult the dedicated documentation in [methods/guest/README.md](methods/guest/README.md).
 
+<br>
 
+## 🙏 Acknowledgements
+
+This project was built upon the [risc0-foundry-template](https://github.com/risc0/risc0-foundry-template) released by [RISC Zero](https://risczero.com). We are grateful for their work and for providing an open and solid foundation that made the development of Risc0Flow possible.
