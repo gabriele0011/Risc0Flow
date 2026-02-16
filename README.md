@@ -70,7 +70,7 @@ The scripts deploy the verifier and your application contract, then write the re
 
 ### Step 3 — Run Risc0Flow
 
-Use the `host` binary with the appropriate flags depending on your workflow.
+Use the `host` binary with the appropriate flags depending on your workflow. For a complete reference of all available flags, input types, and validation rules, see [CLI.md](CLI.md).
 
 **Session only (test the guest logic):**
 ```bash
