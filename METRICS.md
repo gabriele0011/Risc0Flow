@@ -4,7 +4,7 @@ When the `--metrics` flag is enabled, the host collects detailed performance dat
 
 ```bash
 # Example usage
-host run --input '<u256; 0x01>' --prove stark groth16 --metrics
+./target/release/host run --input '<u256; 0x01>' --prove stark groth16 --metrics
 ```
 
 ---
@@ -125,3 +125,4 @@ metrics/
 ├── verify_metrics_<timestamp>.csv
 └── input_<hash>.csv
 ```
+
