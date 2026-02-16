@@ -162,6 +162,8 @@ If enabled via the `--metrics` flag, all execution data is automatically saved i
 - `tx_trace_metrics_*.csv`: Transaction hashes, gas used, gas price, and success status.
 - `verify_metrics_*.csv`: Aggregate on-chain verification statistics (average gas, average time, success rate).
 
+For a complete description of every column, unit, and collection method, see [METRICS.md](METRICS.md).
+
 <br>
 
 ## 🛠️ Custom Development (Guest Code)
