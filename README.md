@@ -6,23 +6,16 @@ It is conceived as an **operations toolkit** that can be executed individually, 
 
 <br>
 
-## 🚀 Key Features
+## Main Features
 
-- **Modular Architecture**: Run sessions, proving, and verification independently or combined.
-- **Multi-Backend Support**: Generate **STARK** proofs (fast and locally verifiable) or **Groth16** proofs (compact and verifiable on-chain).
-- **Local Proving**: Currently optimized for CPU-bound workloads executed locally.
-- **Integrated On-Chain Verification**: Native interaction with Ethereum (Anvil, Sepolia) via Alloy.
-- **Detailed Metrics**: Optional export (`--metrics`) of CSV files for performance analysis (time, RAM, CPU, Gas) across various phases.
+The framework offers the following operational advantages:
 
-<br>
-
-## 🧩 Modular Architecture
-
-The framework is designed to adapt to any need, allowing for both linear and granular execution:
-
-1.  **Session & Debugging (`--session`)**: Executes only the guest program written in Rust.
-2.  **Proving (`--prove`)**: Generates proofs (STARK/Groth16). It can be executed as an intermediate step (saving the proof to disk) or as part of a continuous pipeline.
-3.  **Verification (`--verify`)**: Validates the proof off-chain or on-chain. This can happen immediately after the generation phase or at a later time by loading the file (corresponding to the exported proof) from disk.
+* **Unified CLI orchestration:** It provides a command-line interface to dynamically configure the execution (Session), proof generation (Proving), and validation (Verification) phases without having to modify the host code.
+* **Process decoupling:** It allows executing the phases independently, pausing and resuming the workflow to enable scenarios such as remote proving and deferred verification over time.
+* **Automated ABI management (Type Safety):** It ensures a perfect match between the zkVM input and the expected smart contract output by automatically converting the data provided via CLI into a typed, ABI-encoded format.
+* **Proving and verification flexibility:** It supports multiple backends for receipt generation (STARK and Groth16) and handles distinct paths for local verification (off-chain) or through automated transactions on Ethereum networks like Anvil and Sepolia.
+* **Generic smart contract and Auto-Discovery:** It implements a universal smart contract capable of validating proofs from any Guest logic without requiring modifications to the Solidity code. It also automatically detects deployment addresses through Service Discovery mechanisms.
+* **Observability and metrics:** It integrates a native system for performance tracking that can be exported to CSV. This provides detailed reports on execution times, memory consumption, CPU cycles, and gas estimates.
 
 <br>
 
@@ -35,6 +28,8 @@ This section guides you through the complete workflow, from writing your first g
 The guest program is the Rust code that runs inside the zkVM. This is where your provable logic lives.
 
 Edit the file `methods/guest/src/bin/guest.rs` with your custom logic. A working example is already included as a starting point. For a detailed guide on the I/O pattern (input decoding, ABI-encoded output, commitment), see [methods/guest/README.md](methods/guest/README.md).
+
+<br>
 
 ### Step 1 — Compile the Project
 
@@ -52,6 +47,8 @@ RISC0_USE_DOCKER=1 cargo build --release
 >
 > After building, the binary is available at `./target/release/host`. All commands below use it directly to avoid the overhead of `cargo run` (which re-checks compilation on every invocation).
 
+<br>
+
 ### Step 2 — (Optional) Deploy the Verification Contracts
 
 This step is **required only if you intend to verify proofs on-chain**. If you only need off-chain verification, skip to Step 3.
@@ -67,6 +64,8 @@ bash deploy_sepolia.sh
 ```
 
 The scripts deploy the verifier and your application contract, then write the relevant environment variables to `.env_vars`.
+
+<br>
 
 ### Step 3 — Run Risc0Flow
 
@@ -104,44 +103,12 @@ Use the `host` binary with the appropriate flags depending on your workflow. For
 ./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network anvil --metrics
 ```
 
-> **Tip:** Add `--metrics` to any command to export CSV performance data to the `metrics/` folder.
-
-<br>
-
-## 📖 Usage Scenarios
-
-### 1. Rapid Development (Guest logic only)
-Verify that the guest Rust code works correctly.
-```bash
-./target/release/host run --input '<u256; 42>' --session
-```
-
-### 2. Full Pipeline (All-in-One)
-Generate the proof and verify on-chain.
-```bash
-./target/release/host run --input '<u256; 42>' --prove groth16 --source new --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
-```
-
-### 3. Decoupled Workflow (Remote Proving / Deferred Verification)
-
-**Step A: Generation**
-Generate the proof and export it to a binary file.
-```bash
-./target/release/host run --input '<u256; 42>' --prove groth16
-# Output saved in: proofs/receipt_groth16_<timestamp>.bin
-```
-
-**Step B: Verification**
-Take the generated file and verify the relative proof on-chain.
-```bash
-./target/release/host run --source file --proof-file proofs/receipt_groth16_<timestamp>.bin --verify onchain --network sepolia --wallet $ETH_WALLET_PRIVATE_KEY
-```
-
-### 4. On-Chain Stress Test
-Run multiple verifications to test contract stability or calculate average gas.
+**On-chain stress test (multiple verifications):**
 ```bash
 ./target/release/host run --source file --proof-file <FILE> --verify onchain --network anvil --n-runs 10 --metrics
 ```
+
+> **Tip:** Add `--metrics` to any command to export CSV performance data to the `metrics/` folder.
 
 <br>
 
